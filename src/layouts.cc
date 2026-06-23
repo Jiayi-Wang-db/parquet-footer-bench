@@ -78,6 +78,39 @@ Resolved ResolveSoa(const std::string& blob, const Model& m, Query q) {
   return out;
 }
 
+// =================================================================== AOS_FLAT
+//
+// Array-of-structs: a single list<i64> of interleaved (offset, size) pairs,
+// instead of soa_flat's two parallel lists. Same data, different memory order;
+// useful for asking whether interleaving helps the full-scan decode. Like any
+// varint list it has no random access, so a projection still decodes everything.
+//   struct { 1: list<i64> pairs; }   // [off0, size0, off1, size1, ...]
+std::string BuildAos(const Model& m) {
+  Writer w;
+  w.Field(1, Type::kList);
+  w.ListHeader(Type::kI64, m.chunks() * 2);
+  for (int cc = 0; cc < m.chunks(); ++cc) {
+    w.I64(m.chunk_off[cc]);
+    w.I64(m.chunk_size[cc]);
+  }
+  w.Stop();
+  return w.bytes();
+}
+Resolved ResolveAos(const std::string& blob, const Model& m, Query q) {
+  Reader r(blob);
+  std::vector<int64_t> pairs;
+  for (;;) {
+    auto f = r.NextField();
+    if (f.type == Type::kStop) break;
+    auto lh = r.ListHeader();
+    pairs.resize(lh.size);
+    r.I64List(pairs.data(), lh.size);
+  }
+  Resolved out;
+  ForEachSelected(m, q, [&](int cc) { out.push_back({pairs[cc * 2], pairs[cc * 2 + 1]}); });
+  return out;
+}
+
 // ============================================================== INDEXED_STRUCT
 //
 // One self-contained thrift struct per chunk, plus an i64 directory of byte
@@ -492,6 +525,7 @@ Model BuildModel(const Shape& shape) {
 const std::vector<Layout>& Layouts() {
   static const std::vector<Layout> kLayouts = {
       {"soa_flat", BuildSoa, ResolveSoa},
+      {"aos_flat", BuildAos, ResolveAos},
       {"soa_bitpack", BuildSoaBitpack, ResolveSoaBitpack},
       {"soa_delta_bitpack", BuildSoaDeltaBitpack, ResolveSoaDeltaBitpack},
       {"indexed_struct", BuildIndexed, ResolveIndexed},

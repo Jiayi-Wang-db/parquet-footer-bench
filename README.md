@@ -117,6 +117,11 @@ The fidelity test and the benchmark pick it up automatically. The test will fail
 `ResolveMine` disagrees with the model, so you get correctness for free before you trust a
 number.
 
+**[docs/ADDING_A_LAYOUT.md](docs/ADDING_A_LAYOUT.md)** is a full worked example -- it adds a
+real layout (`aos_flat`) end to end: the `Build`/`Resolve` code, the `Model` contract, the
+encoding helpers available (`bitpack.h`, raw `list<i8>` sections), and how to tune the
+workload.
+
 ## Caveats
 
 - Timings are single-threaded, in-process resolve cost; they do **not** include the network
