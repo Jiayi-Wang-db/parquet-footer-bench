@@ -48,12 +48,26 @@ What you get from the `Model` (`harness.h`):
 | `m.block_len[]`, `m.block_rows[]` | per-page byte lengths and row counts (only if you model a page index) |
 | `m.selected` | the projected column ids (for `Query::kProject`) |
 
-`Query` is `kProject` (read `m.selected` columns) or `kFull` (read all). Most
-layouts share an iteration helper already in the file:
+`Query` is `kProject` (read `m.selected` columns), `kFull` (read all), or `kRowRange`
+(read only the rows in `[m.sel_first_row, m.sel_first_row + m.sel_num_rows)` within each
+row group). Most layouts share an iteration helper already in the file:
 
 ```cpp
 ForEachSelected(m, q, [&](int cc) { /* emit locator for chunk cc */ });
 ```
+
+### Row selection (`kRowRange`)
+
+If your layout has **no** page index, do nothing special: `ForEachSelected` treats
+`kRowRange` like `kProject`, so you return whole chunks -- the honest answer, since you
+cannot skip pages. `aos_flat` above already handles `kRowRange` for free this way.
+
+If your layout **does** carry per-page lengths and rows, set `page_aware = true` in its
+registry entry and branch on `q == Query::kRowRange` to emit the dictionary page plus the
+data pages overlapping the window (use the shared `EmitRowRangePages` helper). The harness
+then checks your row-range result against `m.ExpectedRowsPages()` instead of whole chunks,
+and reports `rowsel_bytes_fetched` so you can see the column I/O you saved. See
+`offset_index` and `placement_plus_pageindex` for worked page-aware examples.
 
 **You do not validate anything yourself.** The harness asserts that your
 `Resolve` returns exactly `m.Expected(q)` for every shape; if your encoding or

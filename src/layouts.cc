@@ -28,7 +28,8 @@
 namespace pfb {
 namespace {
 
-// Iterate the chunk ids a query touches, in resolution order.
+// Iterate the chunk ids a query touches, in resolution order. kProject and
+// kRowRange both iterate the selected columns; kFull iterates everything.
 template <typename Fn>
 void ForEachSelected(const Model& m, Query q, Fn fn) {
   if (q == Query::kFull) {
@@ -37,6 +38,27 @@ void ForEachSelected(const Model& m, Query q, Fn fn) {
     for (int c : m.selected) {
       for (int r = 0; r < m.row_groups; ++r) fn(c * m.row_groups + r);
     }
+  }
+}
+
+// Emit the page-granular locators for one chunk under a row-range query: the
+// dictionary page (always needed) plus each data page overlapping the row window
+// [sel_first_row, sel_first_row + sel_num_rows). `chunk_offset` is the chunk's
+// absolute file offset; blen/brows are the per-block byte lengths and row counts.
+void EmitRowRangePages(const Model& m, int cc, int64_t chunk_offset,
+                       const std::vector<int64_t>& blen, const std::vector<int64_t>& brows,
+                       Resolved& out) {
+  int per = m.pages_per_chunk + 1;
+  int fb = cc * per;
+  int64_t pos = chunk_offset;
+  out.push_back({pos, blen[fb]});  // dictionary page
+  pos += blen[fb];
+  int64_t lo = m.sel_first_row, hi = m.sel_first_row + m.sel_num_rows, cursor = 0;
+  for (int p = 1; p < per; ++p) {
+    int b = fb + p;
+    if (cursor < hi && lo < cursor + brows[b]) out.push_back({pos, blen[b]});
+    pos += blen[b];
+    cursor += brows[b];
   }
 }
 
@@ -218,7 +240,7 @@ std::string BuildOffsetIndex(const Model& m) {
 Resolved ResolveOffsetIndex(const std::string& blob, const Model& m, Query q) {
   Reader r(blob);
   int64_t base = 0;
-  std::vector<int64_t> blocks;
+  std::vector<int64_t> blocks, block_rows;
   std::vector<int32_t> first_block;
   for (;;) {
     auto f = r.NextField();
@@ -234,8 +256,14 @@ Resolved ResolveOffsetIndex(const std::string& blob, const Model& m, Query q) {
       first_block.resize(lh.size);
       r.I32List(first_block.data(), lh.size);
     } else {
-      // page_rows: not needed to resolve placement, skip it.
-      r.Skip(f.type);
+      // page_rows: only needed for a row-range query, otherwise skip.
+      if (q == Query::kRowRange) {
+        auto lh = r.ListHeader();
+        block_rows.resize(lh.size);
+        r.I64List(block_rows.data(), lh.size);
+      } else {
+        r.Skip(f.type);
+      }
     }
   }
   // Derive each chunk's offset by prefix-summing block lengths -- O(total
@@ -245,6 +273,12 @@ Resolved ResolveOffsetIndex(const std::string& blob, const Model& m, Query q) {
   for (size_t i = 0; i < blocks.size(); ++i) block_off[i + 1] = block_off[i] + blocks[i];
   int per = m.pages_per_chunk + 1;
   Resolved out;
+  if (q == Query::kRowRange) {
+    ForEachSelected(m, q, [&](int cc) {
+      EmitRowRangePages(m, cc, block_off[first_block[cc]], blocks, block_rows, out);
+    });
+    return out;
+  }
   ForEachSelected(m, q, [&](int cc) {
     int fb = first_block[cc];
     int64_t off = block_off[fb];
@@ -450,7 +484,7 @@ std::string BuildPlacementPlusPageIndex(const Model& m) {
 Resolved ResolvePlacementPlusPageIndex(const std::string& blob, const Model& m, Query q) {
   Reader r(blob);
   int ob = 0, sb = 0;
-  std::vector<uint8_t> ob_buf, sb_buf;
+  std::vector<uint8_t> ob_buf, sb_buf, page_idx;
   for (;;) {
     auto f = r.NextField();
     if (f.type == Type::kStop) break;
@@ -464,12 +498,34 @@ Resolved ResolvePlacementPlusPageIndex(const std::string& blob, const Model& m, 
       ob_buf = ReadPaddedByteList(r);
     } else if (f.id == 5) {
       sb_buf = ReadPaddedByteList(r);
+    } else if (q == Query::kRowRange) {
+      // Page skipping needs the page index, so decode it this time.
+      page_idx = ReadPaddedByteList(r);
     } else {
-      // Page index: skip in O(1) using the list header's byte length -- no
-      // per-page decode on the placement path.
+      // Placement-only query: skip the page index in O(1) using the list
+      // header's byte length -- no per-page decode on the placement path.
       auto lh = r.ListHeader();
       r.TakeBytes(lh.size);
     }
+  }
+  if (q == Query::kRowRange) {
+    // Unpack the page-index blob: [lb][rb][packed block_len][packed block_rows].
+    int lb = page_idx[0], rb = page_idx[1];
+    int n = m.chunks() * (m.pages_per_chunk + 1);
+    const uint8_t* lenbuf = page_idx.data() + 2;
+    size_t len_bytes = (static_cast<size_t>(n) * lb + 7) / 8;
+    const uint8_t* rowbuf = lenbuf + len_bytes;
+    std::vector<int64_t> blen(n), brows(n);
+    for (int i = 0; i < n; ++i) {
+      blen[i] = static_cast<int64_t>(ExtractBits(lenbuf, i, lb));
+      brows[i] = static_cast<int64_t>(ExtractBits(rowbuf, i, rb));
+    }
+    Resolved out;
+    ForEachSelected(m, q, [&](int cc) {
+      int64_t coff = static_cast<int64_t>(ExtractBits(ob_buf.data(), cc, ob));
+      EmitRowRangePages(m, cc, coff, blen, brows, out);
+    });
+    return out;
   }
   Resolved out;
   ForEachSelected(m, q, [&](int cc) {
@@ -487,6 +543,10 @@ Model BuildModel(const Shape& shape) {
   m.row_groups = shape.row_groups;
   m.pages_per_chunk = shape.pages_per_chunk;
   m.rows_per_group = shape.rows_per_group;
+  // Default row-range window: a few rows in the middle of each row group (a
+  // selective scan). The driver may override via --row-select.
+  m.sel_first_row = m.rows_per_group / 2;
+  m.sel_num_rows = std::min<int64_t>(m.rows_per_group, 1000);
   std::mt19937_64 rng(7);
   std::uniform_int_distribution<int64_t> page(4096, 16384), dict(1024, 4096);
   int chunks = m.chunks();
@@ -529,8 +589,9 @@ const std::vector<Layout>& Layouts() {
       {"soa_bitpack", BuildSoaBitpack, ResolveSoaBitpack},
       {"soa_delta_bitpack", BuildSoaDeltaBitpack, ResolveSoaDeltaBitpack},
       {"indexed_struct", BuildIndexed, ResolveIndexed},
-      {"offset_index", BuildOffsetIndex, ResolveOffsetIndex},
-      {"placement_plus_pageindex", BuildPlacementPlusPageIndex, ResolvePlacementPlusPageIndex},
+      {"offset_index", BuildOffsetIndex, ResolveOffsetIndex, /*page_aware=*/true},
+      {"placement_plus_pageindex", BuildPlacementPlusPageIndex, ResolvePlacementPlusPageIndex,
+       /*page_aware=*/true},
   };
   return kLayouts;
 }

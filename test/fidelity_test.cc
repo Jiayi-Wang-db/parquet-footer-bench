@@ -43,17 +43,21 @@ bool Equal(const Resolved& a, const Resolved& b) {
 
 int g_failures = 0;
 
+void Fail(const Shape& shape, const Layout& L, const char* query) {
+  std::fprintf(stderr, "FAIL: shape=%s layout=%s query=%s\n", shape.name, L.name.c_str(), query);
+  ++g_failures;
+}
+
 void Check(const Shape& shape) {
   Model m = pfb::BuildModel(shape);
   for (const Layout& L : pfb::Layouts()) {
-    for (Query q : {Query::kProject, Query::kFull}) {
-      Resolved got = L.resolve(L.build(m), m, q);
-      if (!Equal(got, m.Expected(q))) {
-        std::fprintf(stderr, "FAIL: shape=%s layout=%s query=%s\n", shape.name, L.name.c_str(),
-                     q == Query::kProject ? "project" : "full");
-        ++g_failures;
-      }
-    }
+    std::string blob = L.build(m);
+    if (!Equal(L.resolve(blob, m, Query::kProject), m.Expected(Query::kProject)))
+      Fail(shape, L, "project");
+    if (!Equal(L.resolve(blob, m, Query::kFull), m.Expected(Query::kFull))) Fail(shape, L, "full");
+    // Row-range: page-aware layouts must resolve to pages; the rest to whole chunks.
+    const Resolved want_rows = L.page_aware ? m.ExpectedRowsPages() : m.Expected(Query::kProject);
+    if (!Equal(L.resolve(blob, m, Query::kRowRange), want_rows)) Fail(shape, L, "row-range");
   }
 }
 

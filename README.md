@@ -104,6 +104,35 @@ What the measurements show:
   projection fast (it decodes only the selected structs) but is larger (directory +
   per-struct framing).
 
+## Row selection: what the page index buys
+
+The `kRowRange` query reads only the rows in a window within each row group (a
+row-selective scan), set with `--row-select FIRST:COUNT` (default: 1000 rows at each
+row group's midpoint). A layout that carries a page index (`page_aware`) resolves it to
+the dictionary page plus the data pages overlapping the window; a layout without page
+info can only fetch whole chunks. The headline metric is `rowsel_bytes_fetched` -- the
+column data the query would actually read.
+
+Selecting 1000 rows (`rowsel_bytes_fetched`, whole-chunk vs page-aware):
+
+| shape | pages/chunk | without page index | with page index | reduction |
+|---|---:|---:|---:|---:|
+| many_pages | 5120 | 1.05 GB | 282 KB | ~3700x |
+| analytics_8m | 64 | 84 MB | 1.6 MB | ~52x |
+| many_rg | 25 | 1.03 GB | 50.9 MB | ~20x |
+| wide_1pg | 1 | 501 KB | 501 KB | **1x (nothing to skip)** |
+
+- The page index pays off in proportion to pages-per-chunk: it lets a selective scan skip
+  to the covering pages instead of reading whole chunks (up to ~3700x less I/O here).
+- The cost is real and on the footer path: a page-aware layout must *decode* the page
+  index for a row range (`rowsel_resolve_us` is ~1-4.5 ms vs microseconds for placement),
+  and the index inflates the footer. That trade -- milliseconds of footer decode against
+  skipping megabytes-to-gigabytes of column I/O -- is the whole argument for the page
+  index, and it only wins when there is more than one page per chunk (contrast `wide_1pg`).
+- This is the complement to `placement_plus_pageindex`: a placement-only query skips the
+  index for free, and a row-selective query decodes it to skip column data. Same footer,
+  two regimes.
+
 ## Adding a layout
 
 A layout is a name plus two functions -- `build` (model -> blob) and `resolve` (blob, model,

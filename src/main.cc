@@ -81,25 +81,48 @@ double TimeUs(Fn fn) {
   }
 }
 
+// Total column-data bytes a query would fetch (sum of locator sizes).
+int64_t BytesFetched(const Resolved& r) {
+  int64_t n = 0;
+  for (const auto& c : r) n += c.size;
+  return n;
+}
+
 struct Row {
   std::string shape, layout;
   int columns, row_groups, pages, projected;
   int64_t rows_per_group, total_rows;
   size_t bytes;
   double build_us, resolve_project_us, resolve_full_us;
+  bool page_aware;
+  int64_t rowsel_num_rows, rowsel_bytes_fetched;
+  double resolve_rowsel_us;
 };
+
+// Optional row-window override from --row-select (negative = use the default).
+int64_t g_sel_first = -1, g_sel_num = -1;
 
 // Returns false if any layout fails the fidelity cross-check.
 bool RunShape(const Shape& shape, std::vector<Row>& rows) {
   Model m = pfb::BuildModel(shape);
+  if (g_sel_num >= 0) {
+    m.sel_first_row = g_sel_first;
+    m.sel_num_rows = g_sel_num;
+  }
   Resolved want_project = m.Expected(Query::kProject);
   Resolved want_full = m.Expected(Query::kFull);
+  Resolved want_rows_pages = m.ExpectedRowsPages();  // truth for page-aware layouts
   bool ok = true;
   for (const Layout& L : pfb::Layouts()) {
     std::string blob = L.build(m);
     Resolved got_project = L.resolve(blob, m, Query::kProject);
     Resolved got_full = L.resolve(blob, m, Query::kFull);
-    if (!Equal(got_project, want_project) || !Equal(got_full, want_full)) {
+    Resolved got_rows = L.resolve(blob, m, Query::kRowRange);
+    // A page-aware layout must resolve a row range to pages; a layout without
+    // page info can only fetch whole chunks, so its truth is the projection.
+    const Resolved& want_rows = L.page_aware ? want_rows_pages : want_project;
+    if (!Equal(got_project, want_project) || !Equal(got_full, want_full) ||
+        !Equal(got_rows, want_rows)) {
       std::fprintf(stderr, "FIDELITY FAIL: shape=%s layout=%s\n", shape.name, L.name.c_str());
       ok = false;
       continue;
@@ -114,6 +137,9 @@ bool RunShape(const Shape& shape, std::vector<Row>& rows) {
     row.rows_per_group = shape.rows_per_group;
     row.total_rows = m.total_rows();
     row.bytes = blob.size();
+    row.page_aware = L.page_aware;
+    row.rowsel_num_rows = m.sel_num_rows;
+    row.rowsel_bytes_fetched = BytesFetched(got_rows);
     row.build_us = TimeUs([&] { volatile size_t s = L.build(m).size(); (void)s; });
     row.resolve_project_us = TimeUs([&] {
       Resolved r = L.resolve(blob, m, Query::kProject);
@@ -121,6 +147,10 @@ bool RunShape(const Shape& shape, std::vector<Row>& rows) {
     });
     row.resolve_full_us = TimeUs([&] {
       Resolved r = L.resolve(blob, m, Query::kFull);
+      if (r.empty()) std::abort();
+    });
+    row.resolve_rowsel_us = TimeUs([&] {
+      Resolved r = L.resolve(blob, m, Query::kRowRange);
       if (r.empty()) std::abort();
     });
     rows.push_back(std::move(row));
@@ -155,11 +185,19 @@ int main(int argc, char** argv) {
       projected = std::atoi(next("--projected"));
     } else if (!std::strcmp(argv[i], "--rows")) {
       rows = std::atoll(next("--rows"));
+    } else if (!std::strcmp(argv[i], "--row-select")) {
+      // FIRST:COUNT -- select COUNT rows starting at FIRST within each row group.
+      const char* v = next("--row-select");
+      const char* colon = std::strchr(v, ':');
+      g_sel_first = std::atoll(v);
+      g_sel_num = colon ? std::atoll(colon + 1) : 1;
     } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
       std::printf(
-          "usage: pfb_bench [--columns N --row-groups R --pages P --projected K --rows ROWS] "
-          "[--list]\n"
-          "  --rows is rows per row group (default 1000000); total rows = ROWS * row-groups.\n"
+          "usage: pfb_bench [--columns N --row-groups R --pages P --projected K --rows ROWS]\n"
+          "                 [--row-select FIRST:COUNT] [--list]\n"
+          "  --rows        rows per row group (default 1000000); total = ROWS * row-groups.\n"
+          "  --row-select  row window within each row group for the row-range query\n"
+          "                (default: 1000 rows at the row-group midpoint).\n"
           "with no shape flags, runs the built-in shapes.\n");
       return 0;
     } else {
@@ -175,12 +213,15 @@ int main(int argc, char** argv) {
 
   std::printf(
       "shape,columns,row_groups,pages,projected,rows_per_group,total_rows,layout,bytes,build_us,"
-      "resolve_project_us,resolve_full_us\n");
+      "resolve_project_us,resolve_full_us,page_aware,rowsel_rows,rowsel_resolve_us,"
+      "rowsel_bytes_fetched\n");
   for (const Row& r : result_rows) {
-    std::printf("%s,%d,%d,%d,%d,%lld,%lld,%s,%zu,%.3f,%.3f,%.3f\n", r.shape.c_str(), r.columns,
-                r.row_groups, r.pages, r.projected, static_cast<long long>(r.rows_per_group),
-                static_cast<long long>(r.total_rows), r.layout.c_str(), r.bytes, r.build_us,
-                r.resolve_project_us, r.resolve_full_us);
+    std::printf("%s,%d,%d,%d,%d,%lld,%lld,%s,%zu,%.3f,%.3f,%.3f,%d,%lld,%.3f,%lld\n", r.shape.c_str(),
+                r.columns, r.row_groups, r.pages, r.projected,
+                static_cast<long long>(r.rows_per_group), static_cast<long long>(r.total_rows),
+                r.layout.c_str(), r.bytes, r.build_us, r.resolve_project_us, r.resolve_full_us,
+                r.page_aware ? 1 : 0, static_cast<long long>(r.rowsel_num_rows),
+                r.resolve_rowsel_us, static_cast<long long>(r.rowsel_bytes_fetched));
   }
   if (!ok) {
     std::fprintf(stderr, "\none or more layouts failed the fidelity cross-check\n");
