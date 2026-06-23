@@ -51,37 +51,58 @@ shape,columns,row_groups,pages,projected,layout,bytes,build_us,resolve_project_u
 | Layout | Encoding | Idea |
 |---|---|---|
 | `soa_flat` | two parallel `list<i64>` (offsets, sizes) | the baseline "placement core": store exactly what the scheduler needs |
+| `soa_bitpack` | offsets & sizes each fixed-bit-width packed | smaller than varint *and* O(1) random access -- a projection extracts only its chunks |
+| `soa_delta_bitpack` | offset deltas + sizes bit-packed | smallest (deltas are tiny) but no random access: every query prefix-sums the whole array |
 | `indexed_struct` | one Thrift struct per chunk + an `i64` byte-offset directory | random-access a projected chunk without decoding the rest |
-| `offset_index` | per-page block lengths + each chunk's first-block index | model "make the page index the placement core"; placement is *derived* by prefix-sum |
+| `offset_index` | per-page block lengths + rows + each chunk's first-block index | model "make the page index *the* placement core"; placement is *derived* by prefix-sum |
+| `placement_plus_pageindex` | bit-packed placement core **+** a separate length-delimited page-index blob | page index is first-class but optional: a placement-only query skips it in O(1) without decoding |
+
+Offsets in these scenarios are real file positions (200 MB - 2.5 GB), so they cost
+**5-byte zig-zag varints** in `soa_flat`/`offset_index` and ~30-32 bits when bit-packed; page
+lengths are 2-3 bytes. Those costs are in the measured numbers, not estimated -- the harness
+serializes real Thrift.
 
 ## Example results
 
-From `./build/pfb_bench` on the four built-in shapes (Release, one machine -- your absolute
-numbers will differ; the *relationships* are the point):
+From `./build/pfb_bench` (Release, one machine -- your absolute numbers will differ; the
+*relationships* are the point). `analytics_8m` is the concrete case: 256 columns x 8 row
+groups of 1,000,000 rows (8M rows), 64 pages/chunk, 16 projected.
 
 | shape | layout | bytes | resolve_project (us) | resolve_full (us) |
 |---|---|---:|---:|---:|
-| wide (5000c x 10rg, 1pg) | soa_flat | 383 KB | 297 | 1067 |
-| | indexed_struct | 682 KB | **116** | 602 |
-| | offset_index | 379 KB | 578 | 706 |
-| many_rg (10c x 1000rg, 25pg) | soa_flat | **79 KB** | 76 | 117 |
-| | indexed_struct | 138 KB | 60 | 107 |
-| | offset_index | 716 KB | 2595 | 2671 |
-| many_pages (10c x 5rg, 5120pg) | soa_flat | **0.45 KB** | 0.48 | 0.66 |
-| | indexed_struct | 0.70 KB | 0.44 | 0.67 |
-| | offset_index | 682 KB | 2467 | 2563 |
+| analytics_8m (256c, 8M rows, 64pg) | soa_flat | 16 KB | 12.0 | 23.7 |
+| | soa_bitpack | 13 KB | 2.8 | 29.5 |
+| | soa_delta_bitpack | **10 KB** | 16.0 | 35.7 |
+| | indexed_struct | 28 KB | 5.4 | 20.8 |
+| | offset_index | 755 KB | 1023 | 1048 |
+| | placement_plus_pageindex | 496 KB | **2.7** | 30.1 |
+| many_pages (10c x 5rg, 5120pg) | soa_flat | 0.45 KB | 0.48 | 0.66 |
+| | soa_bitpack | **0.38 KB** | 0.49 | 0.90 |
+| | offset_index | 1450 KB | 1975 | 2022 |
+| | placement_plus_pageindex | 961 KB | **0.50** | 0.91 |
 
 What the measurements show:
 
-- **Deriving placement from a page index scales with pages, not chunks.** `offset_index`
-  is the largest blob whenever there is more than one page per chunk (up to ~1500x on
-  `many_pages`) and its resolve is a full prefix-sum sweep -- O(total blocks), with no
-  shortcut for a selective projection.
-- **A varint list has no random access.** `soa_flat` is the smallest, but resolving a
-  projection still decodes the whole offset/size lists, so it pays for columns it won't read.
+- **Bit-packing beats varint on both axes for placement.** `soa_bitpack` is smaller than
+  `soa_flat` *and* gives O(1) random access, so a selective projection extracts only the
+  chunks it needs (analytics: 2.8 us vs 12 us). `soa_delta_bitpack` is the smallest of all
+  (offset deltas are tiny) but trades away random access -- every query prefix-sums the
+  whole array, so its project time matches its full time.
+- **Deriving placement from a page index scales with pages, not chunks.** `offset_index` is
+  the largest blob whenever there is more than one page per chunk (up to ~3000x on
+  `many_pages`) and its resolve is a full prefix-sum sweep -- O(total blocks), no shortcut
+  for a projection. Making the page index *the* placement core makes the common
+  placement-only query pay for page detail it doesn't use.
+- **You can keep the page index first-class without paying to decode it.**
+  `placement_plus_pageindex` carries the entire page index as a separate length-delimited
+  section, yet a placement-only query skips it in O(1) (pointer bump from the list header)
+  and resolves as fast as `soa_bitpack` -- e.g. `many_pages` 0.5 us vs `offset_index`'s
+  1975 us, despite both holding the same page data. A writer could place that section in a
+  separate footer byte-range so a query that never needs page skipping pays nothing for it
+  at all -- not even the bytes.
 - **A directory buys random access at a size cost.** `indexed_struct` resolves a small
-  projection fastest (it decodes only the selected structs) but is ~1.8x larger (directory
-  + per-struct framing). For a full scan it converges with `soa_flat`.
+  projection fast (it decodes only the selected structs) but is larger (directory +
+  per-struct framing).
 
 ## Adding a layout
 

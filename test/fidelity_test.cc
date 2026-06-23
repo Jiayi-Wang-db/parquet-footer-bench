@@ -60,11 +60,17 @@ void Check(const Shape& shape) {
 }  // namespace
 
 int main() {
+  // {columns, row_groups, pages_per_chunk, projected, rows_per_group, name}
   const std::vector<Shape> shapes = {
-      {1, 1, 0, 1, "degenerate"},     {3, 1, 1, 1, "tiny"},
-      {5000, 10, 1, 4, "wide"},       {200, 5, 20, 4, "latemat"},
-      {10, 1000, 25, 4, "many_rg"},   {10, 5, 5120, 4, "many_pages"},
-      {64, 8, 3, 64, "project_all"},  {100, 1, 0, 7, "no_data_pages"},
+      {1, 1, 0, 1, 0, "degenerate"},
+      {3, 1, 1, 1, 1000, "tiny"},
+      {5000, 10, 1, 4, 20'000, "wide"},
+      {200, 5, 20, 4, 400'000, "latemat"},
+      {10, 1000, 25, 4, 500'000, "many_rg"},
+      {10, 5, 5120, 4, 1'000'000, "many_pages"},
+      {64, 8, 3, 64, 90'000, "project_all"},
+      {100, 1, 0, 7, 0, "no_data_pages"},
+      {256, 8, 64, 16, 1'000'000, "analytics_8m"},
   };
   for (const Shape& s : shapes) Check(s);
   if (g_failures) {

@@ -161,6 +161,18 @@ class Reader {
     for (int32_t i = 0; i < n; ++i) out[i] = I32();
   }
 
+  // Take n raw bytes and advance (a list<i8> body is stored contiguously).
+  // Returns nullptr and latches an error if fewer than n bytes remain.
+  const char* TakeBytes(int32_t n) {
+    if (!Avail(static_cast<size_t>(n))) {
+      ok_ = false;
+      return nullptr;
+    }
+    const char* r = p_;
+    p_ += n;
+    return r;
+  }
+
   // Skip a value of the given type (used to ignore fields a layout doesn't read).
   void Skip(Type type) {
     switch (type) {

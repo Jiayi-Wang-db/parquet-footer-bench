@@ -57,25 +57,29 @@ enum class Query { kProject, kFull };
 // groups (so N*R chunks), each chunk holding 1 dictionary page + P data pages.
 // A query projects K of the N columns.
 struct Shape {
-  int columns;          // N
-  int row_groups;       // R
-  int pages_per_chunk;  // P (data pages; a dictionary page is always added)
-  int projected;        // K
-  const char* name;     // human label
+  int columns;             // N
+  int row_groups;          // R
+  int pages_per_chunk;     // P (data pages; a dictionary page is always added)
+  int projected;           // K
+  int64_t rows_per_group;  // rows in each row group (total rows = rows_per_group * R)
+  const char* name;        // human label
 };
 
 // Ground truth derived from a Shape: the real placement every layout must
 // reproduce, plus the per-page lengths a page-index-style layout would store.
 struct Model {
   int columns, row_groups, pages_per_chunk;
-  int64_t base = 4;  // first byte after the Parquet magic header
+  int64_t rows_per_group = 0;  // rows in each row group
+  int64_t base = 4;            // first byte after the Parquet magic header
 
   std::vector<int64_t> chunk_off;   // [columns*row_groups], index = c*R + r
   std::vector<int64_t> chunk_size;  // [columns*row_groups]
   std::vector<int64_t> block_len;   // [(P+1) per chunk]: dict page, then P data pages
+  std::vector<int64_t> block_rows;  // [(P+1) per chunk]: rows in each page (dict page = 0)
   std::vector<int> selected;        // projected column ids, sorted
 
   int chunks() const { return columns * row_groups; }
+  int64_t total_rows() const { return rows_per_group * row_groups; }
 
   // The truth a Resolve must match, for a given query.
   Resolved Expected(Query q) const {

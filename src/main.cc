@@ -44,13 +44,20 @@ using pfb::Query;
 using pfb::Resolved;
 using pfb::Shape;
 
-// Built-in shapes spanning the regimes that distinguish the layouts: many narrow
-// chunks, few wide chunks, many row groups, and many pages per chunk.
+// Built-in shapes spanning the regimes that distinguish the layouts. Fields:
+// {columns, row_groups, pages_per_chunk, projected, rows_per_group, name}.
+//
+// `analytics_8m` is a concrete, realistic case: a 256-column table written as a
+// single file of 8 row groups x 1,000,000 rows (8M rows total), each column
+// chunk split into 64 ~16K-row data pages, with a 16-column projection -- the
+// kind of wide analytics scan where footer resolution shows up. The others are
+// stress regimes: many narrow chunks, many row groups, and many pages per chunk.
 const std::vector<Shape> kBuiltinShapes = {
-    {5000, 10, 1, 4, "wide_1pg"},
-    {200, 5, 20, 4, "latemat_20pg"},
-    {10, 1000, 25, 4, "many_rg_25pg"},
-    {10, 5, 5120, 4, "many_pages"},
+    {256, 8, 64, 16, 1'000'000, "analytics_8m"},
+    {5000, 10, 1, 4, 20'000, "wide_1pg"},
+    {200, 5, 20, 4, 400'000, "latemat_20pg"},
+    {10, 1000, 25, 4, 500'000, "many_rg_25pg"},
+    {10, 5, 5120, 4, 100'000'000, "many_pages"},
 };
 
 bool Equal(const Resolved& a, const Resolved& b) {
@@ -77,6 +84,7 @@ double TimeUs(Fn fn) {
 struct Row {
   std::string shape, layout;
   int columns, row_groups, pages, projected;
+  int64_t rows_per_group, total_rows;
   size_t bytes;
   double build_us, resolve_project_us, resolve_full_us;
 };
@@ -103,6 +111,8 @@ bool RunShape(const Shape& shape, std::vector<Row>& rows) {
     row.row_groups = shape.row_groups;
     row.pages = shape.pages_per_chunk;
     row.projected = shape.projected;
+    row.rows_per_group = shape.rows_per_group;
+    row.total_rows = m.total_rows();
     row.bytes = blob.size();
     row.build_us = TimeUs([&] { volatile size_t s = L.build(m).size(); (void)s; });
     row.resolve_project_us = TimeUs([&] {
@@ -123,6 +133,7 @@ bool RunShape(const Shape& shape, std::vector<Row>& rows) {
 int main(int argc, char** argv) {
   std::vector<Shape> shapes = kBuiltinShapes;
   int columns = -1, row_groups = 1, pages = 1, projected = 4;
+  int64_t rows = 1'000'000;
   for (int i = 1; i < argc; ++i) {
     auto next = [&](const char* flag) -> const char* {
       if (i + 1 >= argc) {
@@ -142,9 +153,13 @@ int main(int argc, char** argv) {
       pages = std::atoi(next("--pages"));
     } else if (!std::strcmp(argv[i], "--projected")) {
       projected = std::atoi(next("--projected"));
+    } else if (!std::strcmp(argv[i], "--rows")) {
+      rows = std::atoll(next("--rows"));
     } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
       std::printf(
-          "usage: pfb_bench [--columns N --row-groups R --pages P --projected K] [--list]\n"
+          "usage: pfb_bench [--columns N --row-groups R --pages P --projected K --rows ROWS] "
+          "[--list]\n"
+          "  --rows is rows per row group (default 1000000); total rows = ROWS * row-groups.\n"
           "with no shape flags, runs the built-in shapes.\n");
       return 0;
     } else {
@@ -152,17 +167,20 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  if (columns > 0) shapes = {{columns, row_groups, pages, projected, "custom"}};
+  if (columns > 0) shapes = {{columns, row_groups, pages, projected, rows, "custom"}};
 
-  std::vector<Row> rows;
+  std::vector<Row> result_rows;
   bool ok = true;
-  for (const Shape& s : shapes) ok &= RunShape(s, rows);
+  for (const Shape& s : shapes) ok &= RunShape(s, result_rows);
 
-  std::printf("shape,columns,row_groups,pages,projected,layout,bytes,build_us,resolve_project_us,resolve_full_us\n");
-  for (const Row& r : rows) {
-    std::printf("%s,%d,%d,%d,%d,%s,%zu,%.3f,%.3f,%.3f\n", r.shape.c_str(), r.columns, r.row_groups,
-                r.pages, r.projected, r.layout.c_str(), r.bytes, r.build_us, r.resolve_project_us,
-                r.resolve_full_us);
+  std::printf(
+      "shape,columns,row_groups,pages,projected,rows_per_group,total_rows,layout,bytes,build_us,"
+      "resolve_project_us,resolve_full_us\n");
+  for (const Row& r : result_rows) {
+    std::printf("%s,%d,%d,%d,%d,%lld,%lld,%s,%zu,%.3f,%.3f,%.3f\n", r.shape.c_str(), r.columns,
+                r.row_groups, r.pages, r.projected, static_cast<long long>(r.rows_per_group),
+                static_cast<long long>(r.total_rows), r.layout.c_str(), r.bytes, r.build_us,
+                r.resolve_project_us, r.resolve_full_us);
   }
   if (!ok) {
     std::fprintf(stderr, "\none or more layouts failed the fidelity cross-check\n");
