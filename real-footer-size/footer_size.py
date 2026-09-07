@@ -5,7 +5,9 @@ import argparse
 import json
 import os
 import struct
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import compact
@@ -148,6 +150,38 @@ def measure(path, suffix_limit):
     }
 
 
+def modular_measure(path, converter, suffix_limit):
+    handle, output_name = tempfile.mkstemp(prefix="modular-footer-", suffix=".bin")
+    os.close(handle)
+    output = Path(output_name)
+    command = [
+        str(converter),
+        "--truncate-minmax={}".format(suffix_limit),
+        str(path),
+        str(output),
+    ]
+    try:
+        completed = subprocess.run(
+            command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        values = {}
+        for line in completed.stdout.splitlines():
+            pieces = line.split()
+            if len(pieces) == 2 and pieces[0] in ("modular_total_bytes", "column_chunks"):
+                values[pieces[0]] = int(pieces[1])
+        measured_size = output.stat().st_size
+        if values.get("modular_total_bytes") != measured_size:
+            raise ValueError("converter output size does not match its report")
+        return {
+            "bytes": measured_size,
+            "column_chunks": values.get("column_chunks"),
+        }
+    finally:
+        if output.exists():
+            output.unlink()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("names", nargs="*", help="dataset names; default: all")
@@ -155,31 +189,37 @@ def main():
     parser.add_argument("--data", type=Path, default=ROOT / "data")
     parser.add_argument("--suffix-limit", type=int, default=16)
     parser.add_argument("--csv", action="store_true")
+    parser.add_argument(
+        "--modular-converter",
+        type=Path,
+        default=ROOT.parent / "build" / "modular_footer_convert",
+    )
     args = parser.parse_args()
     entries = json.loads(args.manifest.read_text())["datasets"]
     by_name = {entry["name"]: entry for entry in entries}
     selected = [by_name[name] for name in args.names] if args.names else entries
 
     if args.csv:
-        print("name,standard,no_path,prefix_suffix,path_saving,stats_saving")
+        print("name,standard,no_path,prefix_suffix,modular,path_saving,stats_saving")
     else:
-        print("{:<32} {:>12} {:>12} {:>12} {:>10} {:>10}".format(
-            "name", "standard", "no_path", "prefix_16", "path save", "stat save"
+        print("{:<32} {:>12} {:>12} {:>12} {:>12} {:>10} {:>10}".format(
+            "name", "standard", "no_path", "prefix_16", "modular", "path save", "stat save"
         ))
     for entry in selected:
         path = args.data / (entry["name"] + ".parquet")
         result = measure(path, args.suffix_limit)
+        modular = modular_measure(path, args.modular_converter, args.suffix_limit)
         path_saving = 1 - result["no_path"] / result["standard"]
         stats_saving = 1 - result["prefix_suffix"] / result["no_path"]
         if args.csv:
-            print("{},{},{},{},{:.8f},{:.8f}".format(
+            print("{},{},{},{},{},{:.8f},{:.8f}".format(
                 entry["name"], result["standard"], result["no_path"],
-                result["prefix_suffix"], path_saving, stats_saving
+                result["prefix_suffix"], modular["bytes"], path_saving, stats_saving
             ))
         else:
-            print("{:<32} {:>12,d} {:>12,d} {:>12,d} {:>9.2%} {:>9.2%}".format(
+            print("{:<32} {:>12,d} {:>12,d} {:>12,d} {:>12,d} {:>9.2%} {:>9.2%}".format(
                 entry["name"], result["standard"], result["no_path"],
-                result["prefix_suffix"], path_saving, stats_saving
+                result["prefix_suffix"], modular["bytes"], path_saving, stats_saving
             ))
         if result["standard"] != entry["footer_bytes"]:
             raise ValueError("{} footer differs from manifest".format(entry["name"]))

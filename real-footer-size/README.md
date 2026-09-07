@@ -21,6 +21,13 @@ python3 real-footer-size/footer_size.py
 python3 real-footer-size/visualize.py
 ```
 
+Build the dependency-free modular converter before running the last two commands:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j --target modular_footer_convert
+```
+
 ![Normalized footer-size comparison](footer-size.svg)
 
 Downloads use an atomic `.part` file and land in the gitignored `real-footer-size/data/` directory.
@@ -46,12 +53,19 @@ than estimated.
 
 Current results with a 16-byte suffix limit:
 
-| dataset | standard | no path | prefix + suffix16 |
-|---|---:|---:|---:|
-| US Accidents | 4,747,144 | 4,080,829 | 3,616,584 |
-| FineWeb 10BT | 3,971,883 | 3,881,669 | 1,408,067 |
-| Hacker News | 1,840,138 | 1,698,502 | 1,183,709 |
-| Yellow Taxi | 11,212 | 9,900 | 8,512 |
+| dataset | standard | no path | prefix + suffix16 | modular |
+|---|---:|---:|---:|---:|
+| US Accidents | 4,747,144 | 4,080,829 | 3,616,584 | 1,766,176 |
+| FineWeb 10BT | 3,971,883 | 3,881,669 | 1,408,067 | 531,813 |
+| Hacker News | 1,840,138 | 1,698,502 | 1,183,709 | 599,212 |
+| Yellow Taxi | 11,212 | 9,900 | 8,512 | 6,377 |
+
+The comparison excludes page indexes. Standard Parquet stores its page-index blobs outside the
+footer, while the modular representation embeds them in modules, so including them on only one
+side would not be an apples-to-apples footer-size comparison.
+
+Both prefix-based representations cap each min/max suffix at the configured limit (16 bytes in the
+table), so their statistics policies are directly comparable.
 
 ## Common-prefix sharing versus truncation
 
