@@ -52,3 +52,33 @@ Current results with a 16-byte suffix limit:
 | FineWeb 10BT | 3,971,883 | 3,881,669 | 1,408,067 |
 | Hacker News | 1,840,138 | 1,698,502 | 1,183,709 |
 | Yellow Taxi | 11,212 | 9,900 | 8,512 |
+
+## Common-prefix sharing versus truncation
+
+The last column above combines two effects. Running with an effectively unlimited suffix isolates
+the common-prefix representation; comparing that result with the 16-byte result isolates the
+additional effect of truncation:
+
+| dataset | no path | prefix, untruncated | prefix + suffix16 | prefix saving | truncation saving |
+|---|---:|---:|---:|---:|---:|
+| US Accidents | 4,080,829 | 3,744,296 | 3,616,584 | 336,533 | 127,712 |
+| FineWeb 10BT | 3,881,669 | 3,784,175 | 1,408,067 | 97,494 | 2,376,108 |
+| Hacker News | 1,698,502 | 1,563,106 | 1,183,709 | 135,396 | 379,397 |
+| Yellow Taxi | 9,900 | 8,512 | 8,512 | 1,388 | 0 |
+
+FineWeb's large reduction is therefore almost entirely truncation (96% of its statistics saving),
+while US Accidents benefits mostly from the prefix representation. Hacker News is mixed but leans
+toward truncation, and Yellow Taxi has no statistic longer than the 16-byte suffix limit.
+
+There is one important accounting caveat: the standard Arrow-written files contain both legacy
+`min`/`max` and modern `min_value`/`max_value` fields. The experimental representation replaces
+those four bounds with one prefix and two suffixes. Consequently, "prefix saving" above includes
+both common-prefix sharing and removal of the duplicate legacy bounds; it does not measure prefix
+sharing in isolation.
+
+Reproduce the two measurements with:
+
+```sh
+python3 real-footer-size/footer_size.py --suffix-limit 1000000000 --csv
+python3 real-footer-size/footer_size.py --suffix-limit 16 --csv
+```
