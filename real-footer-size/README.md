@@ -16,7 +16,12 @@ python3 real-footer-size/download.py
 
 # Inspect exact standard footer sizes from the downloaded files.
 python3 real-footer-size/footer_size.py
+
+# Regenerate the checked-in visualization.
+python3 real-footer-size/visualize.py
 ```
+
+![Normalized footer-size comparison](footer-size.svg)
 
 Downloads use an atomic `.part` file and land in the gitignored `real-footer-size/data/` directory.
 Pass one or more dataset names to either command to operate on a subset.

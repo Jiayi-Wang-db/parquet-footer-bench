@@ -127,44 +127,68 @@ def prefix_statistics(footer, suffix_limit):
     return converted, prefix_bytes, suffix_bytes, truncated
 
 
+def measure(path, suffix_limit):
+    unused_file_bytes, standard = read_footer(path)
+    decoded = compact.decode(standard)
+    if compact.encode(decoded) != standard:
+        raise ValueError("compact-Thrift fidelity check failed for {}".format(path))
+    path_fields = without_paths(decoded)
+    no_path = compact.encode(decoded)
+    converted, prefix_bytes, suffix_bytes, truncated = prefix_statistics(decoded, suffix_limit)
+    prefix_stats = compact.encode(decoded)
+    return {
+        "standard": len(standard),
+        "no_path": len(no_path),
+        "prefix_suffix": len(prefix_stats),
+        "path_fields": path_fields,
+        "stats_converted": converted,
+        "stats_truncated": truncated,
+        "prefix_bytes": prefix_bytes,
+        "suffix_bytes": suffix_bytes,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("names", nargs="*", help="dataset names; default: all")
     parser.add_argument("--manifest", type=Path, default=ROOT / "corpus.json")
     parser.add_argument("--data", type=Path, default=ROOT / "data")
     parser.add_argument("--suffix-limit", type=int, default=16)
+    parser.add_argument("--csv", action="store_true")
     args = parser.parse_args()
     entries = json.loads(args.manifest.read_text())["datasets"]
     by_name = {entry["name"]: entry for entry in entries}
     selected = [by_name[name] for name in args.names] if args.names else entries
 
-    print("{:<32} {:>12} {:>12} {:>12} {:>10} {:>10}".format(
-        "name", "standard", "no_path", "prefix_16", "path save", "stat save"
-    ))
+    if args.csv:
+        print("name,standard,no_path,prefix_suffix,path_saving,stats_saving")
+    else:
+        print("{:<32} {:>12} {:>12} {:>12} {:>10} {:>10}".format(
+            "name", "standard", "no_path", "prefix_16", "path save", "stat save"
+        ))
     for entry in selected:
         path = args.data / (entry["name"] + ".parquet")
-        unused_file_bytes, standard = read_footer(path)
-        decoded = compact.decode(standard)
-        if compact.encode(decoded) != standard:
-            raise ValueError("compact-Thrift fidelity check failed for {}".format(entry["name"]))
-        without_paths(decoded)
-        no_path = compact.encode(decoded)
-        converted, prefix_bytes, suffix_bytes, truncated = prefix_statistics(
-            decoded, args.suffix_limit
-        )
-        prefix_stats = compact.encode(decoded)
-        print("{:<32} {:>12,d} {:>12,d} {:>12,d} {:>9.2%} {:>9.2%}".format(
-            entry["name"],
-            len(standard),
-            len(no_path),
-            len(prefix_stats),
-            1 - len(no_path) / len(standard),
-            1 - len(prefix_stats) / len(no_path),
-        ))
-        if len(standard) != entry["footer_bytes"]:
+        result = measure(path, args.suffix_limit)
+        path_saving = 1 - result["no_path"] / result["standard"]
+        stats_saving = 1 - result["prefix_suffix"] / result["no_path"]
+        if args.csv:
+            print("{},{},{},{},{:.8f},{:.8f}".format(
+                entry["name"], result["standard"], result["no_path"],
+                result["prefix_suffix"], path_saving, stats_saving
+            ))
+        else:
+            print("{:<32} {:>12,d} {:>12,d} {:>12,d} {:>9.2%} {:>9.2%}".format(
+                entry["name"], result["standard"], result["no_path"],
+                result["prefix_suffix"], path_saving, stats_saving
+            ))
+        if result["standard"] != entry["footer_bytes"]:
             raise ValueError("{} footer differs from manifest".format(entry["name"]))
-        print("  stats: {} converted, {} truncated, {:,} prefix bytes, "
-              "{:,} suffix bytes".format(converted, truncated, prefix_bytes, suffix_bytes))
+        if not args.csv:
+            print("  stats: {} converted, {} truncated, {:,} prefix bytes, "
+                  "{:,} suffix bytes".format(
+                      result["stats_converted"], result["stats_truncated"],
+                      result["prefix_bytes"], result["suffix_bytes"]
+                  ))
     return 0
 
 

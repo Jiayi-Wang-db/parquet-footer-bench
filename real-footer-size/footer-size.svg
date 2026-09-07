@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="690" viewBox="0 0 1120 690">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>text{font-family:system-ui,-apple-system,sans-serif;fill:#172033}.title{font-size:25px;font-weight:700}.subtitle{font-size:14px;fill:#526071}.dataset{font-size:16px;font-weight:650}.label{font-size:12px;fill:#526071}.value{font-size:12px;font-weight:600}.axis{font-size:11px;fill:#64748b}</style>
+<text x="40" y="42" class="title">Real Parquet footer size by representation</text>
+<text x="40" y="68" class="subtitle">Each dataset is normalized to its standard footer; labels show measured serialized bytes.</text>
+<rect x="40" y="91" width="15" height="15" rx="3" fill="#64748b"/>
+<text x="62" y="103" class="label">Standard</text>
+<rect x="245" y="91" width="15" height="15" rx="3" fill="#2563eb"/>
+<text x="267" y="103" class="label">No path_in_schema</text>
+<rect x="450" y="91" width="15" height="15" rx="3" fill="#16a34a"/>
+<text x="472" y="103" class="label">Prefix + suffix16</text>
+<text x="40" y="170" class="dataset">US Accidents</text>
+<rect x="205" y="145" width="790.0" height="22" rx="3" fill="#64748b"/>
+<text x="1003.0" y="161" class="value">4.53 MiB (100.0%)</text>
+<rect x="205" y="176" width="679.1146234451704" height="22" rx="3" fill="#2563eb"/>
+<text x="892.1146234451704" y="192" class="value">3.89 MiB (86.0%)</text>
+<rect x="205" y="207" width="601.8568975367084" height="22" rx="3" fill="#16a34a"/>
+<text x="814.8568975367084" y="223" class="value">3.45 MiB (76.2%)</text>
+<line x1="40" y1="250" x2="1080" y2="250" stroke="#e5e7eb"/>
+<text x="40" y="295" class="dataset">FineWeb 10BT</text>
+<rect x="205" y="270" width="790.0" height="22" rx="3" fill="#64748b"/>
+<text x="1003.0" y="286" class="value">3.79 MiB (100.0%)</text>
+<rect x="205" y="301" width="772.056606400541" height="22" rx="3" fill="#2563eb"/>
+<text x="985.056606400541" y="317" class="value">3.70 MiB (97.7%)</text>
+<rect x="205" y="332" width="280.0618573104998" height="22" rx="3" fill="#16a34a"/>
+<text x="493.0618573104998" y="348" class="value">1.34 MiB (35.5%)</text>
+<line x1="40" y1="375" x2="1080" y2="375" stroke="#e5e7eb"/>
+<text x="40" y="420" class="dataset">Hacker News</text>
+<rect x="205" y="395" width="790.0" height="22" rx="3" fill="#64748b"/>
+<text x="1003.0" y="411" class="value">1.75 MiB (100.0%)</text>
+<rect x="205" y="426" width="729.1934517954631" height="22" rx="3" fill="#2563eb"/>
+<text x="942.1934517954631" y="442" class="value">1.62 MiB (92.3%)</text>
+<rect x="205" y="457" width="508.18477201166434" height="22" rx="3" fill="#16a34a"/>
+<text x="721.1847720116643" y="473" class="value">1.13 MiB (64.3%)</text>
+<line x1="40" y1="500" x2="1080" y2="500" stroke="#e5e7eb"/>
+<text x="40" y="545" class="dataset">Yellow Taxi</text>
+<rect x="205" y="520" width="790.0" height="22" rx="3" fill="#64748b"/>
+<text x="1003.0" y="536" class="value">10.9 KiB (100.0%)</text>
+<rect x="205" y="551" width="697.5561897966464" height="22" rx="3" fill="#2563eb"/>
+<text x="910.5561897966464" y="567" class="value">9.7 KiB (88.3%)</text>
+<rect x="205" y="582" width="599.7574027827328" height="22" rx="3" fill="#16a34a"/>
+<text x="812.7574027827328" y="598" class="value">8.3 KiB (75.9%)</text>
+</svg>
