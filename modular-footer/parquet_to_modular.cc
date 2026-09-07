@@ -41,9 +41,16 @@
 // live at absolute file offsets before the footer, so this needs a full file
 // (leading PAR1 magic) whose page-index ranges lie within it. Nothing is
 // invented -- a bare tail, or a file without a page index, emits none.
+//
+// With --truncate-minmax[=N] (default N=16) the stored min/max suffixes are cut
+// to at most N bytes: the min suffix to a prefix (still a valid lower bound) and
+// the max suffix rounded up (still a valid upper bound), clearing the exactness
+// bit when truncated. Applies to row-group statistics and, with --page-index,
+// the column index.
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
@@ -445,9 +452,41 @@ static size_t CommonPrefix(const std::string& a, const std::string& b) {
   return i;
 }
 
+// Smallest byte string > p that shares p's leading bytes: increment the last
+// byte below 0xFF and drop the rest. Empty result means p is all 0xFF (no finite
+// rounded-up bound exists).
+static std::string RoundUp(std::string p) {
+  for (int i = static_cast<int>(p.size()) - 1; i >= 0; --i) {
+    if (static_cast<uint8_t>(p[i]) != 0xFF) {
+      p[i] = static_cast<char>(static_cast<uint8_t>(p[i]) + 1);
+      p.resize(i + 1);
+      return p;
+    }
+  }
+  return std::string();
+}
+
+// Truncate a (prefix-stripped) min/max suffix pair to at most `limit` bytes,
+// preserving pruning bounds: the min suffix is cut to a prefix (still <= the true
+// min), the max suffix is cut and rounded up (still >= the true max). Clears the
+// corresponding exactness flag when a value is actually truncated. limit <= 0
+// disables truncation.
+static void TruncateSuffix(std::string& min_suf, std::string& max_suf,
+                           uint64_t& min_exact, uint64_t& max_exact, int limit) {
+  if (limit <= 0) return;
+  if (static_cast<int>(min_suf.size()) > limit) {
+    min_suf.resize(limit);
+    min_exact = 0;
+  }
+  if (static_cast<int>(max_suf.size()) > limit) {
+    std::string up = RoundUp(max_suf.substr(0, limit));
+    if (!up.empty()) { max_suf = up; max_exact = 0; }  // else keep the exact max
+  }
+}
+
 // Build one leaf column's ColumnStatistics descriptor across row groups; empty
 // string if the column has no statistics at all.
-static std::string BuildColumnStatistics(const FileMeta& fm, int c, int G) {
+static std::string BuildColumnStatistics(const FileMeta& fm, int c, int G, int trunc) {
   std::vector<uint64_t> null_pos, null_val;
   std::vector<uint64_t> mm_pos, min_ex, max_ex;
   std::vector<std::string> pref, min_suf, max_suf;
@@ -456,12 +495,15 @@ static std::string BuildColumnStatistics(const FileMeta& fm, int c, int G) {
     if (st.has_null) { null_pos.push_back(g); null_val.push_back(static_cast<uint64_t>(st.null_count)); }
     if (st.has_minmax) {
       size_t lcp = CommonPrefix(st.minv, st.maxv);
+      std::string ms = st.minv.substr(lcp), xs = st.maxv.substr(lcp);
+      uint64_t me = st.min_exact ? 1 : 0, xe = st.max_exact ? 1 : 0;
+      TruncateSuffix(ms, xs, me, xe, trunc);
       mm_pos.push_back(g);
       pref.push_back(st.minv.substr(0, lcp));
-      min_suf.push_back(st.minv.substr(lcp));
-      max_suf.push_back(st.maxv.substr(lcp));
-      min_ex.push_back(st.min_exact ? 1 : 0);
-      max_ex.push_back(st.max_exact ? 1 : 0);
+      min_suf.push_back(ms);
+      max_suf.push_back(xs);
+      min_ex.push_back(me);
+      max_ex.push_back(xe);
     }
   }
   if (null_pos.empty() && mm_pos.empty()) return {};
@@ -471,8 +513,13 @@ static std::string BuildColumnStatistics(const FileMeta& fm, int c, int G) {
     PutBytesSparse(d, 2, G, mm_pos, pref);                                    // minmax_prefixes
     PutBytesSparse(d, 3, G, mm_pos, min_suf);                                 // min_suffixes
     PutBytesSparse(d, 4, G, mm_pos, max_suf);                                 // max_suffixes
-    PutIntSparse(d, 5, G, mm_pos, min_ex);                                    // min_is_exact
-    PutIntSparse(d, 6, G, mm_pos, max_ex);                                    // max_is_exact
+    bool any_inexact = false;
+    for (size_t i = 0; i < mm_pos.size(); ++i)
+      if (!min_ex[i] || !max_ex[i]) { any_inexact = true; break; }
+    if (any_inexact) {  // absent exactness arrays mean every present bound is exact
+      PutIntSparse(d, 5, G, mm_pos, min_ex);                                  // min_is_exact
+      PutIntSparse(d, 6, G, mm_pos, max_ex);                                  // max_is_exact
+    }
   }
   d.Stop();
   return d.bytes();
@@ -526,7 +573,7 @@ static std::string BuildOffsetIndexChunk(const std::string& blob) {
 // Parse a ColumnIndex blob (null_pages, min_values, max_values, boundary_order,
 // optional null_counts) into a ColumnIndexChunk descriptor. Min/max are present
 // only for non-null pages and use common-prefix stripping (PRESENT_INDEX).
-static std::string BuildColumnIndexChunk(const std::string& blob) {
+static std::string BuildColumnIndexChunk(const std::string& blob, int trunc) {
   Reader r(blob.data(), blob.size());
   std::vector<uint64_t> null_pages;                 // 0/1 per page
   std::vector<std::string> mins, maxs;
@@ -565,16 +612,21 @@ static std::string BuildColumnIndexChunk(const std::string& blob) {
   r.StructEnd(s);
 
   const int32_t P = static_cast<int32_t>(null_pages.size());
-  std::vector<uint64_t> mm_pos, pref_pos;
+  std::vector<uint64_t> mm_pos, min_ex, max_ex;
   std::vector<std::string> pref, min_suf, max_suf;
   for (int32_t p = 0; p < P; ++p) {
     if (null_pages[p]) continue;                    // null page has no min/max
     if (p >= static_cast<int32_t>(mins.size()) || p >= static_cast<int32_t>(maxs.size())) break;
     size_t lcp = CommonPrefix(mins[p], maxs[p]);
+    std::string ms = mins[p].substr(lcp), xs = maxs[p].substr(lcp);
+    uint64_t me = 1, xe = 1;                         // ColumnIndex bounds are exact until truncated
+    TruncateSuffix(ms, xs, me, xe, trunc);
     mm_pos.push_back(static_cast<uint64_t>(p));
     pref.push_back(mins[p].substr(0, lcp));
-    min_suf.push_back(mins[p].substr(lcp));
-    max_suf.push_back(maxs[p].substr(lcp));
+    min_suf.push_back(ms);
+    max_suf.push_back(xs);
+    min_ex.push_back(me);
+    max_ex.push_back(xe);
   }
 
   Writer w;
@@ -589,8 +641,15 @@ static std::string BuildColumnIndexChunk(const std::string& blob) {
     PutBytesSparse(w, 4, P, mm_pos, pref);           // minmax_prefixes
     PutBytesSparse(w, 5, P, mm_pos, min_suf);        // min_suffixes
     PutBytesSparse(w, 6, P, mm_pos, max_suf);        // max_suffixes
+    bool any_inexact = false;
+    for (size_t i = 0; i < mm_pos.size(); ++i)
+      if (!min_ex[i] || !max_ex[i]) { any_inexact = true; break; }
+    if (any_inexact) {  // only stored when truncation made a bound inexact
+      PutIntSparse(w, 7, P, mm_pos, min_ex);         // min_is_exact
+      PutIntSparse(w, 8, P, mm_pos, max_ex);         // max_is_exact
+    }
   }
-  // 7/8 (min_is_exact/max_is_exact) and 9 (nan_counts): not present in ColumnIndex.
+  // 9 (nan_counts): not present in ColumnIndex.
   w.Stop();
   return w.bytes();
 }
@@ -605,13 +664,18 @@ struct DirEntry { int32_t kind; int64_t off; int64_t len; };
 int main(int argc, char** argv) {
   std::vector<std::string> pos;
   bool emit_pi = false;
+  int trunc = 0;  // max min/max suffix bytes; 0 = no truncation
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--page-index" || a == "-p") emit_pi = true;
+    else if (a == "--truncate-minmax") trunc = 16;
+    else if (a.rfind("--truncate-minmax=", 0) == 0) trunc = std::atoi(a.c_str() + 18);
     else pos.push_back(a);
   }
   if (pos.empty()) {
-    std::fprintf(stderr, "usage: %s [--page-index] input.parquet [output.modular]\n", argv[0]);
+    std::fprintf(stderr,
+        "usage: %s [--page-index] [--truncate-minmax[=N]] input.parquet [output.modular]\n",
+        argv[0]);
     return 2;
   }
   const std::string in_path = pos[0];
@@ -699,7 +763,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> col_desc(C);
     bool have_stats = false;
     for (int c = 0; c < C; ++c) {
-      col_desc[c] = BuildColumnStatistics(fm, c, G);
+      col_desc[c] = BuildColumnStatistics(fm, c, G, trunc);
       if (!col_desc[c].empty()) have_stats = true;
     }
 
@@ -747,7 +811,7 @@ int main(int argc, char** argv) {
             const bool has = column ? ch.has_column_index : ch.has_offset_index;
             if (has && len > 0 && off >= 0 && off + len <= footer_start) {
               std::string blob = ReadRange(in, off, len);
-              desc[cc] = column ? BuildColumnIndexChunk(blob) : BuildOffsetIndexChunk(blob);
+              desc[cc] = column ? BuildColumnIndexChunk(blob, trunc) : BuildOffsetIndexChunk(blob);
               any = true;
             }
           }
