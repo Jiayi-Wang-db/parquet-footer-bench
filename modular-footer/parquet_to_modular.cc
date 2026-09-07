@@ -26,7 +26,7 @@
 // (CMakeLists.txt target modular_footer_convert) and any C++17 compiler.
 //
 //   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-//   ./build/modular_footer_convert input.parquet [output.modular]
+//   ./build/modular_footer_convert [--page-index] input.parquet [output.modular]
 //
 // Translates every module the FileMetaData footer carries:
 //   * schema             (copied verbatim -- read in full anyway)
@@ -35,8 +35,12 @@
 //                          directory; null counts and min/max as PRESENT_INDEX,
 //                          min/max with common-prefix stripping)
 //   * file metadata      (created_by + key_value_metadata)
-// The OFFSET_INDEX / COLUMN_INDEX page index lives in a separate file region
-// (not in the footer), so it is not part of a footer-only translation.
+//
+// With --page-index it also emits the OFFSET_INDEX and COLUMN_INDEX modules, but
+// only when that page-index data is actually present and reachable: the blobs
+// live at absolute file offsets before the footer, so this needs a full file
+// (leading PAR1 magic) whose page-index ranges lie within it. Nothing is
+// invented -- a bare tail, or a file without a page index, emits none.
 
 #include <cstdint>
 #include <cstdio>
@@ -97,6 +101,7 @@ class Reader {
     p_ += n;
     return s;
   }
+  uint8_t Byte() { if (!Avail(1)) { ok_ = false; return 0; } return static_cast<uint8_t>(*p_++); }
   int16_t StructBegin() { int16_t s = last_id_; last_id_ = 0; return s; }
   void StructEnd(int16_t s) { last_id_ = s; }
 
@@ -128,6 +133,7 @@ class Reader {
   }
   void SkipList() {
     ListHdr h = List();
+    if (h.elem == T_TRUE || h.elem == T_FALSE) { Advance(static_cast<size_t>(h.size)); return; }
     for (int32_t i = 0; i < h.size && ok_; ++i) Skip(h.elem);
   }
 
@@ -283,6 +289,9 @@ struct Chunk {
   int32_t codec = 0, type = 0;
   bool has_dict = false;
   bool fully_dict = false;   // every data page dictionary-encoded (from encoding_stats)
+  int64_t offset_index_offset = 0, column_index_offset = 0;  // absolute file offsets
+  int32_t offset_index_length = 0, column_index_length = 0;
+  bool has_offset_index = false, has_column_index = false;
   Stat stat;
 };
 struct RowGroup { int64_t num_rows = 0; std::vector<Chunk> columns; };
@@ -369,8 +378,15 @@ static Chunk ParseColumnChunk(Reader& r) {
   Chunk c;
   int16_t s = r.StructBegin();
   for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
-    if (f.id == 3 && f.type == T_STRUCT) c = ParseColumnMetaData(r);  // meta_data
-    else r.Skip(f.type);
+    switch (f.id) {
+      // meta_data (field 3) precedes the index locators, so assigning c here is safe.
+      case 3: if (f.type == T_STRUCT) c = ParseColumnMetaData(r); else r.Skip(f.type); break;
+      case 4: c.offset_index_offset = r.I64(); c.has_offset_index = true; break;
+      case 5: c.offset_index_length = r.I32(); break;
+      case 6: c.column_index_offset = r.I64(); c.has_column_index = true; break;
+      case 7: c.column_index_length = r.I32(); break;
+      default: r.Skip(f.type); break;
+    }
     if (!r.ok()) break;
   }
   r.StructEnd(s);
@@ -462,28 +478,121 @@ static std::string BuildColumnStatistics(const FileMeta& fm, int c, int G) {
   return d.bytes();
 }
 
-static std::string ReadFooter(const std::string& path, size_t* oss_footer_bytes) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) throw std::runtime_error("cannot open " + path);
-  in.seekg(0, std::ios::end);
-  std::streamoff size = in.tellg();
-  if (size < 8) throw std::runtime_error("file too small to be Parquet");
-  char tail[8];
-  in.seekg(size - 8);
-  in.read(tail, 8);
-  if (std::memcmp(tail + 4, "PAR1", 4) != 0)
-    throw std::runtime_error("missing PAR1 magic (encrypted or not a Parquet file)");
-  uint32_t len = static_cast<uint8_t>(tail[0]) | (static_cast<uint8_t>(tail[1]) << 8) |
-                 (static_cast<uint8_t>(tail[2]) << 16) |
-                 (static_cast<uint32_t>(static_cast<uint8_t>(tail[3])) << 24);
-  if (static_cast<std::streamoff>(len) + 8 > size)
-    throw std::runtime_error("footer length exceeds file size");
-  std::string footer(len, '\0');
-  in.seekg(size - 8 - static_cast<std::streamoff>(len));
-  in.read(&footer[0], len);
-  if (!in) throw std::runtime_error("short read of footer");
-  *oss_footer_bytes = len;
-  return footer;
+static std::string ReadRange(std::ifstream& in, int64_t off, int32_t len) {
+  std::string s(static_cast<size_t>(len), '\0');
+  in.seekg(off);
+  in.read(&s[0], len);
+  if (!in) throw std::runtime_error("failed reading page-index range");
+  return s;
+}
+
+// Parse an OffsetIndex blob (list<PageLocation{offset,compressed_page_size,
+// first_row_index}>) into an OffsetIndexChunk descriptor (dense per-page arrays).
+static std::string BuildOffsetIndexChunk(const std::string& blob) {
+  Reader r(blob.data(), blob.size());
+  std::vector<uint64_t> offsets, sizes, rows;
+  int16_t s = r.StructBegin();
+  for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
+    if (f.id == 1 && f.type == T_LIST) {
+      Reader::ListHdr h = r.List();
+      for (int32_t i = 0; i < h.size && r.ok(); ++i) {
+        int64_t off = 0, row = 0; int32_t sz = 0;
+        int16_t ss = r.StructBegin();
+        for (Reader::Field g = r.NextField(); g.type != T_STOP; g = r.NextField()) {
+          if (g.id == 1) off = r.I64();
+          else if (g.id == 2) sz = r.I32();
+          else if (g.id == 3) row = r.I64();
+          else r.Skip(g.type);
+        }
+        r.StructEnd(ss);
+        offsets.push_back(static_cast<uint64_t>(off));
+        sizes.push_back(static_cast<uint64_t>(sz));
+        rows.push_back(static_cast<uint64_t>(row));
+      }
+    } else {
+      r.Skip(f.type);
+    }
+    if (!r.ok()) break;
+  }
+  r.StructEnd(s);
+  Writer w;
+  PutIntDense(w, 1, offsets);
+  PutIntDense(w, 2, sizes);
+  PutIntDense(w, 3, rows);
+  w.Stop();
+  return w.bytes();
+}
+
+// Parse a ColumnIndex blob (null_pages, min_values, max_values, boundary_order,
+// optional null_counts) into a ColumnIndexChunk descriptor. Min/max are present
+// only for non-null pages and use common-prefix stripping (PRESENT_INDEX).
+static std::string BuildColumnIndexChunk(const std::string& blob) {
+  Reader r(blob.data(), blob.size());
+  std::vector<uint64_t> null_pages;                 // 0/1 per page
+  std::vector<std::string> mins, maxs;
+  std::vector<uint64_t> null_counts;
+  bool has_null_counts = false;
+  int32_t boundary_order = 0;
+  int16_t s = r.StructBegin();
+  for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
+    switch (f.id) {
+      case 1: {  // null_pages: list<bool> (one byte per element: 1=true, 2=false)
+        Reader::ListHdr h = r.List();
+        for (int32_t i = 0; i < h.size && r.ok(); ++i) null_pages.push_back(r.Byte() == 1 ? 1 : 0);
+        break;
+      }
+      case 2: {  // min_values: list<binary>
+        Reader::ListHdr h = r.List();
+        for (int32_t i = 0; i < h.size && r.ok(); ++i) mins.push_back(r.Binary());
+        break;
+      }
+      case 3: {  // max_values: list<binary>
+        Reader::ListHdr h = r.List();
+        for (int32_t i = 0; i < h.size && r.ok(); ++i) maxs.push_back(r.Binary());
+        break;
+      }
+      case 4: boundary_order = r.I32(); break;
+      case 5: {  // null_counts: list<i64>
+        Reader::ListHdr h = r.List();
+        for (int32_t i = 0; i < h.size && r.ok(); ++i) null_counts.push_back(static_cast<uint64_t>(r.I64()));
+        has_null_counts = true;
+        break;
+      }
+      default: r.Skip(f.type); break;
+    }
+    if (!r.ok()) break;
+  }
+  r.StructEnd(s);
+
+  const int32_t P = static_cast<int32_t>(null_pages.size());
+  std::vector<uint64_t> mm_pos, pref_pos;
+  std::vector<std::string> pref, min_suf, max_suf;
+  for (int32_t p = 0; p < P; ++p) {
+    if (null_pages[p]) continue;                    // null page has no min/max
+    if (p >= static_cast<int32_t>(mins.size()) || p >= static_cast<int32_t>(maxs.size())) break;
+    size_t lcp = CommonPrefix(mins[p], maxs[p]);
+    mm_pos.push_back(static_cast<uint64_t>(p));
+    pref.push_back(mins[p].substr(0, lcp));
+    min_suf.push_back(mins[p].substr(lcp));
+    max_suf.push_back(maxs[p].substr(lcp));
+  }
+
+  Writer w;
+  w.Field(1, T_I32); w.I32(boundary_order);         // boundary_order
+  PutIntDense(w, 2, null_pages);                    // null_pages (dense bool)
+  if (has_null_counts && !null_counts.empty()) {
+    std::vector<uint64_t> pos(null_counts.size());
+    for (size_t i = 0; i < pos.size(); ++i) pos[i] = i;
+    PutIntSparse(w, 3, P, pos, null_counts);         // null_counts (per page)
+  }
+  if (!mm_pos.empty()) {
+    PutBytesSparse(w, 4, P, mm_pos, pref);           // minmax_prefixes
+    PutBytesSparse(w, 5, P, mm_pos, min_suf);        // min_suffixes
+    PutBytesSparse(w, 6, P, mm_pos, max_suf);        // max_suffixes
+  }
+  // 7/8 (min_is_exact/max_is_exact) and 9 (nan_counts): not present in ColumnIndex.
+  w.Stop();
+  return w.bytes();
 }
 
 // Modular-footer ModuleKind values (ModularFooter.thrift).
@@ -494,15 +603,43 @@ struct DirEntry { int32_t kind; int64_t off; int64_t len; };
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2) {
-    std::fprintf(stderr, "usage: %s input.parquet [output.modular]\n", argv[0]);
+  std::vector<std::string> pos;
+  bool emit_pi = false;
+  for (int i = 1; i < argc; ++i) {
+    std::string a = argv[i];
+    if (a == "--page-index" || a == "-p") emit_pi = true;
+    else pos.push_back(a);
+  }
+  if (pos.empty()) {
+    std::fprintf(stderr, "usage: %s [--page-index] input.parquet [output.modular]\n", argv[0]);
     return 2;
   }
-  const std::string in_path = argv[1];
-  const std::string out_path = argc >= 3 ? argv[2] : in_path + ".modular";
+  const std::string in_path = pos[0];
+  const std::string out_path = pos.size() >= 2 ? pos[1] : in_path + ".modular";
   try {
-    size_t oss_footer_bytes = 0;
-    std::string footer = ReadFooter(in_path, &oss_footer_bytes);
+    std::ifstream in(in_path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot open " + in_path);
+    in.seekg(0, std::ios::end);
+    std::streamoff fsize = in.tellg();
+    if (fsize < 8) throw std::runtime_error("file too small to be Parquet");
+    char head[4] = {0};
+    in.seekg(0); in.read(head, 4);
+    const bool full_file = std::memcmp(head, "PAR1", 4) == 0;  // else a bare tail
+    char tail[8];
+    in.seekg(fsize - 8); in.read(tail, 8);
+    if (std::memcmp(tail + 4, "PAR1", 4) != 0)
+      throw std::runtime_error("missing PAR1 magic (encrypted or not a Parquet file)");
+    uint32_t footer_len = static_cast<uint8_t>(tail[0]) | (static_cast<uint8_t>(tail[1]) << 8) |
+                          (static_cast<uint8_t>(tail[2]) << 16) |
+                          (static_cast<uint32_t>(static_cast<uint8_t>(tail[3])) << 24);
+    if (static_cast<std::streamoff>(footer_len) + 8 > fsize)
+      throw std::runtime_error("footer length exceeds file size");
+    const int64_t footer_start = fsize - 8 - static_cast<std::streamoff>(footer_len);
+    const size_t oss_footer_bytes = footer_len;
+    std::string footer(footer_len, '\0');
+    in.seekg(footer_start); in.read(&footer[0], footer_len);
+    if (!in) throw std::runtime_error("short read of footer");
+
     Reader r(footer.data(), footer.size());
     FileMeta fm = ParseFileMetaData(r);
     if (!r.ok()) throw std::runtime_error("failed to parse FileMetaData footer");
@@ -592,6 +729,40 @@ int main(int argc, char** argv) {
                      static_cast<int64_t>(rgstats.bytes().size())});
     }
 
+    // ---- page index (optional): only when --page-index is set AND the data is
+    // actually reachable in the input -- a full file whose page-index byte ranges
+    // lie before the footer. A bare tail, or a file without a page index, emits
+    // none (nothing is invented).
+    if (emit_pi && full_file) {
+      auto build_index = [&](bool column, int32_t kind) {
+        std::vector<uint64_t> chunk_off(N + 1, 0);
+        std::vector<std::string> desc(N);
+        bool any = false;
+        for (int c = 0; c < C; ++c)
+          for (int g = 0; g < G; ++g) {
+            int64_t cc = static_cast<int64_t>(c) * G + g;
+            const Chunk& ch = fm.row_groups[g].columns[c];
+            const int64_t off = column ? ch.column_index_offset : ch.offset_index_offset;
+            const int32_t len = column ? ch.column_index_length : ch.offset_index_length;
+            const bool has = column ? ch.has_column_index : ch.has_offset_index;
+            if (has && len > 0 && off >= 0 && off + len <= footer_start) {
+              std::string blob = ReadRange(in, off, len);
+              desc[cc] = column ? BuildColumnIndexChunk(blob) : BuildOffsetIndexChunk(blob);
+              any = true;
+            }
+          }
+        if (!any) return;
+        for (int64_t cc = 0; cc < N; ++cc) { chunk_off[cc] = out.size(); out.append(desc[cc]); }
+        chunk_off[N] = out.size();
+        Writer pim;
+        PutIntDense(pim, 1, chunk_off);  // chunk_offsets
+        pim.Stop();
+        dir.push_back({kind, place(pim.bytes()), static_cast<int64_t>(pim.bytes().size())});
+      };
+      build_index(false, K_OFFSET_INDEX);
+      build_index(true, K_COLUMN_INDEX);
+    }
+
     // ---- ModularFooter directory root, appended last.
     Writer root;
     root.Field(1, T_I32); root.I32(fm.version);
@@ -619,11 +790,17 @@ int main(int argc, char** argv) {
     out_file.write(out.data(), out.size());
     out_file.close();
 
-    // stats region = per-column descriptors + the RowGroupStatisticsModule.
-    const size_t known = schema.bytes().size() + placement.bytes().size() +
-                         (have_filemeta ? filemeta.bytes().size() : 0) + root.bytes().size();
-    const size_t stats_region = out.size() - known;
-
+    auto kind_name = [](int32_t k) -> const char* {
+      switch (k) {
+        case K_SCHEMA: return "schema";
+        case K_PLACEMENT: return "placement";
+        case K_ROW_GROUP_STATISTICS: return "row_group_stats";
+        case K_OFFSET_INDEX: return "offset_index";
+        case K_COLUMN_INDEX: return "column_index";
+        case K_FILE_METADATA: return "file_metadata";
+        default: return "?";
+      }
+    };
     std::printf("input                 %s\n", in_path.c_str());
     std::printf("oss_footer_bytes      %zu\n", oss_footer_bytes);
     std::printf("columns               %d\n", C);
@@ -631,11 +808,10 @@ int main(int argc, char** argv) {
     std::printf("column_chunks         %lld\n", static_cast<long long>(N));
     std::printf("rows                  %lld\n", static_cast<long long>(fm.num_rows));
     std::printf("modular_total_bytes   %zu\n", out.size());
-    std::printf("  schema_module       %zu\n", schema.bytes().size());
-    std::printf("  placement_module    %zu\n", placement.bytes().size());
-    if (have_stats)     std::printf("  rowgroup_stats      %zu\n", stats_region);
-    if (have_filemeta)  std::printf("  file_metadata       %zu\n", filemeta.bytes().size());
-    std::printf("  directory_root      %zu\n", root.bytes().size());
+    std::printf("modules (kind: directory location; per-chunk/column descriptors counted in total):\n");
+    for (const DirEntry& e : dir)
+      std::printf("  %-16s off=%lld len=%lld\n", kind_name(e.kind),
+                  static_cast<long long>(e.off), static_cast<long long>(e.len));
     std::printf("wrote                 %s (%zu bytes)\n", out_path.c_str(), out.size());
     return 0;
   } catch (const std::exception& e) {
