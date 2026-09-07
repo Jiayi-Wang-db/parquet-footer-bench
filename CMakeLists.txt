@@ -34,6 +34,11 @@ target_include_directories(pfb_layouts PUBLIC include)
 add_executable(pfb_bench src/main.cc)
 target_link_libraries(pfb_bench PRIVATE pfb_layouts)
 
+# Footer -> modular-footer converter (reads a real Parquet footer). Uses a
+# vendored compact codec + include/pfb/bitpack.h; no third-party dependencies.
+add_executable(modular_footer_convert modular-footer/parquet_to_modular.cc)
+target_include_directories(modular_footer_convert PRIVATE include)
+
 enable_testing()
 add_executable(pfb_fidelity_test test/fidelity_test.cc)
 target_link_libraries(pfb_fidelity_test PRIVATE pfb_layouts)
