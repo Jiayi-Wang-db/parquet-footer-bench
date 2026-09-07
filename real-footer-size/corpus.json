@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "datasets": [
+    {
+      "name": "us-accidents-00004-of-00007",
+      "url": "https://huggingface.co/datasets/yuvidhepe/us-accidents-updated/resolve/main/data/train-00004-of-00007-e1474292f5ac4b40.parquet",
+      "bytes": 192313189,
+      "sha256": "09acfc6fbe056a861c2deb890de2d9d05cba29c6ddf25601553742ca598c68ca",
+      "footer_bytes": 4747144
+    },
+    {
+      "name": "fineweb-10bt-000",
+      "url": "https://huggingface.co/datasets/HuggingFaceFW/fineweb/resolve/main/sample/10BT/000_00000.parquet",
+      "bytes": 2147292183,
+      "sha256": "6b552ea48424648dc86d00df276f93fdfc55e9ad342ce3e4affc23a3a370792b",
+      "footer_bytes": 3971883
+    },
+    {
+      "name": "hacker-news-00000-of-00039",
+      "url": "https://huggingface.co/datasets/OpenPipe/hacker-news/resolve/main/data/train-00000-of-00039.parquet",
+      "bytes": 255110897,
+      "sha256": "0be91c530649873e740eab4f641a1ea935a79667c6250312443d885a48db1741",
+      "footer_bytes": 1840138
+    },
+    {
+      "name": "yellow-tripdata-2025-01",
+      "url": "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2025-01.parquet",
+      "bytes": 59158238,
+      "sha256": "9af277e4c0d3f9deb30644da822981e1e7df6af58313170fd3aa8a474485488a",
+      "footer_bytes": 11212
+    }
+  ]
+}
