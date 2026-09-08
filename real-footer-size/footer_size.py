@@ -157,6 +157,9 @@ def oss_breakdown(path):
     if compact.encode(decoded) != standard:
         raise ValueError("compact-Thrift fidelity check failed for {}".format(path))
 
+    without_paths(decoded)
+    without_path = len(compact.encode(decoded))
+
     for metadata in column_metadata(decoded):
         metadata[:] = [item for item in metadata if item[0] != 12]
     without_stats = len(compact.encode(decoded))
@@ -165,11 +168,16 @@ def oss_breakdown(path):
     without_placement = len(compact.encode(decoded))
 
     decoded[:] = [item for item in decoded if item[0] != 2]
+    without_schema = len(compact.encode(decoded))
+
+    decoded[:] = [item for item in decoded if item[0] != 5]
     other = len(compact.encode(decoded))
     return {
-        "schema": without_placement - other,
+        "path_in_schema": len(standard) - without_path,
+        "statistics": without_path - without_stats,
         "placement": without_stats - without_placement,
-        "statistics": len(standard) - without_stats,
+        "schema": without_placement - without_schema,
+        "key_value_metadata": without_schema - other,
         "other": other,
         "total": len(standard),
     }
@@ -204,10 +212,16 @@ def modular_measure(path, converter, suffix_limit):
         measured_size = output.stat().st_size
         if values.get("modular_total_bytes") != measured_size:
             raise ValueError("converter output size does not match its report")
+        serialized = output.read_bytes()
+        module_bytes = {
+            name: serialized[module["offset"]:module["offset"] + module["length"]]
+            for name, module in modules.items()
+        }
         return {
             "bytes": measured_size,
             "column_chunks": values.get("column_chunks"),
             "modules": modules,
+            "module_bytes": module_bytes,
         }
     finally:
         if output.exists():
@@ -219,6 +233,12 @@ def modular_breakdown(path, converter, suffix_limit):
     modules = measured["modules"]
     schema = modules.get("schema", {}).get("length", 0)
     placement = modules.get("placement", {}).get("length", 0)
+    key_value_metadata = 0
+    file_metadata = measured["module_bytes"].get("file_metadata")
+    if file_metadata is not None:
+        decoded = compact.decode(file_metadata)
+        without_key_values = [item for item in decoded if item[0] != 2]
+        key_value_metadata = len(file_metadata) - len(compact.encode(without_key_values))
     statistics = 0
     stats = modules.get("row_group_stats")
     if stats is not None:
@@ -228,11 +248,13 @@ def modular_breakdown(path, converter, suffix_limit):
             if module["offset"] < stats["offset"] and name != "row_group_stats"
         )
         statistics = stats["offset"] + stats["length"] - preceding_end
-    other = measured["bytes"] - schema - placement - statistics
+    other = measured["bytes"] - schema - placement - statistics - key_value_metadata
     return {
+        "path_in_schema": 0,
         "schema": schema,
         "placement": placement,
         "statistics": statistics,
+        "key_value_metadata": key_value_metadata,
         "other": other,
         "total": measured["bytes"],
     }

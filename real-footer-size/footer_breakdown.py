@@ -12,12 +12,29 @@ import footer_size
 
 
 ROOT = Path(__file__).resolve().parent
-COMPONENTS = ("schema", "placement", "statistics", "other")
+COMPONENTS = (
+    "path_in_schema",
+    "statistics",
+    "schema",
+    "placement",
+    "key_value_metadata",
+    "other",
+)
 COLORS = {
+    "path_in_schema": "#dc2626",
+    "statistics": "#16a34a",
     "schema": "#2563eb",
     "placement": "#f59e0b",
-    "statistics": "#16a34a",
+    "key_value_metadata": "#8b5cf6",
     "other": "#94a3b8",
+}
+LABELS = {
+    "path_in_schema": "path_in_schema",
+    "statistics": "Row-group stats",
+    "schema": "Schema",
+    "placement": "Placement",
+    "key_value_metadata": "Key/value metadata",
+    "other": "Other/framing",
 }
 
 
@@ -75,12 +92,15 @@ def svg(rows, suffix_limit):
         ),
     ]
     for index, component in enumerate(COMPONENTS):
-        x = 40 + index * 245
-        parts.append('<rect x="{}" y="96" width="16" height="16" rx="3" fill="{}"/>'.format(
-            x, COLORS[component]
+        row = index // 3
+        column = index % 3
+        x = 40 + column * 360
+        y = 91 + row * 28
+        parts.append('<rect x="{}" y="{}" width="16" height="16" rx="3" fill="{}"/>'.format(
+            x, y, COLORS[component]
         ))
-        parts.append('<text x="{}" y="109" class="legend">{}</text>'.format(
-            x + 23, component.title()
+        parts.append('<text x="{}" y="{}" class="legend">{}</text>'.format(
+            x + 23, y + 13, LABELS[component]
         ))
 
     for group, (entry, oss, modular) in enumerate(rows):

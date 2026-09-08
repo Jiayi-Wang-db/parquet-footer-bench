@@ -76,14 +76,18 @@ table), so their statistics policies are directly comparable.
 ## Component breakdown
 
 `footer-breakdown.svg` keeps the total-size graph separate and divides both representations into
-schema, placement, row-group statistics, and other bytes. The OSS split uses progressive clearing:
-it removes every `ColumnMetaData.statistics`, then `FileMetaData.row_groups`, then
-`FileMetaData.schema`. The serialized-size difference at each step is assigned to that component,
-so the four components add up exactly despite compact-Thrift field-header interactions.
+`path_in_schema`, row-group statistics, schema, placement, key/value metadata, and residual
+framing. Placement covers offsets, sizes, codecs, and physical types. The OSS split uses
+progressive clearing: it removes every path, every `ColumnMetaData.statistics`, then
+`FileMetaData.row_groups`, `FileMetaData.schema`, and `FileMetaData.key_value_metadata`. The
+serialized-size difference at each step is assigned to that component, so the components add up
+exactly despite compact-Thrift field-header interactions.
 
-For modular footers, schema and placement are the corresponding modules. Statistics include both
-the per-column descriptors and the row-group-statistics directory. Other includes file metadata,
-the modular root directory, and framing. Page indexes are excluded from both representations.
+For modular footers, schema and placement are the corresponding modules and `path_in_schema` is
+zero because the schema supplies the mapping. Statistics include both the per-column descriptors
+and the row-group-statistics directory. Key/value metadata is isolated inside the file-metadata
+module; created-by, the modular root directory, and framing remain in other. Page indexes are
+excluded from both representations.
 
 ## Common-prefix sharing versus truncation
 
