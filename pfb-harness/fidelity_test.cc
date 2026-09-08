@@ -24,7 +24,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "pfb/harness.h"
+#include "harness.h"
 
 namespace {
 

@@ -26,12 +26,13 @@ endif()
 
 add_compile_options(-Wall -Wextra)
 
-# No third-party dependencies: the Thrift Compact codec is vendored in
-# include/pfb/thrift_compact.h so this builds with any C++17 compiler.
-add_library(pfb_layouts STATIC src/layouts.cc)
-target_include_directories(pfb_layouts PUBLIC include)
+# The pfb layout harness (synthetic footer shapes). No third-party dependencies: the
+# Thrift Compact codec is vendored in pfb-harness/thrift_compact.h. The harness headers
+# live beside its sources in pfb-harness/; the shared bit packing is in include/pfb/.
+add_library(pfb_layouts STATIC pfb-harness/layouts.cc)
+target_include_directories(pfb_layouts PUBLIC include pfb-harness)
 
-add_executable(pfb_bench src/main.cc)
+add_executable(pfb_bench pfb-harness/main.cc)
 target_link_libraries(pfb_bench PRIVATE pfb_layouts)
 
 # Footer -> modular-footer converter (reads a real Parquet footer). Uses a
@@ -53,6 +54,6 @@ add_executable(modular_schema_index_check modular-footer/schema_index_check.cc)
 target_include_directories(modular_schema_index_check PRIVATE include)
 
 enable_testing()
-add_executable(pfb_fidelity_test test/fidelity_test.cc)
+add_executable(pfb_fidelity_test pfb-harness/fidelity_test.cc)
 target_link_libraries(pfb_fidelity_test PRIVATE pfb_layouts)
 add_test(NAME fidelity COMMAND pfb_fidelity_test)

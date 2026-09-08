@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "pfb/harness.h"
+#include "harness.h"
 
 #include <algorithm>
 #include <numeric>
@@ -23,7 +23,7 @@
 #include <vector>
 
 #include "pfb/bitpack.h"
-#include "pfb/thrift_compact.h"
+#include "thrift_compact.h"
 
 namespace pfb {
 namespace {

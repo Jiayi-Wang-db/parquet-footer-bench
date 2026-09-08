@@ -33,7 +33,7 @@
 #include <string>
 #include <vector>
 
-#include "pfb/harness.h"
+#include "harness.h"
 
 namespace {
 
