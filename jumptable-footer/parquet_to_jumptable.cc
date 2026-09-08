@@ -16,7 +16,7 @@
 // under the License.
 
 // parquet_to_jumptable -- read a Parquet file's footer and emit its jump-table
-// version, fully per JumpTableFooter.thrift:
+// version, fully per parquet.thrift (the jump-table structs):
 //
 //   * FileMetaData.footer_index_pointer (field 10, v1) is emitted FIRST, before
 //     all other fields, so a reader can grab it without walking the footer. The
@@ -169,6 +169,14 @@ class Writer {
       for (const auto& e : kv) { ZigZag(e.first); ZigZag(e.second); }
     }
   }
+  void MapI16I64Field(int16_t id, const std::vector<std::pair<int16_t, int64_t>>& kv) {
+    Field(id, T_MAP);
+    Varint(kv.size());
+    if (!kv.empty()) {
+      Byte(static_cast<uint8_t>((T_I16 << 4) | T_I64));
+      for (const auto& e : kv) { ZigZag(e.first); ZigZag(e.second); }
+    }
+  }
   void EmptyStructField(int16_t id) { Field(id, T_STRUCT); Stop(); }  // struct {} with no fields
   int16_t StructBegin() { int16_t s = last_id_; last_id_ = 0; return s; }
   void StructEnd(int16_t s) { last_id_ = s; }
@@ -204,6 +212,7 @@ struct Walk {
   int columns = 0;                     // leaf columns (= columns in each row group)
   std::vector<int64_t> chunk_offsets;  // (columns + 1) per row group
   std::vector<SchemaElem> schema;      // DFS pre-order, element 0 = root
+  std::vector<std::pair<int16_t, int64_t>> top_fields;  // (field id, byte offset) per top-level field
   bool already_indexed = false;
 };
 
@@ -223,7 +232,11 @@ SchemaElem ParseSchemaElement(Reader& r) {
 Walk WalkFooter(const std::string& footer) {
   Walk w;
   Reader r(footer.data(), footer.size());
-  for (Reader::Field f = r.NextField(); f.type != T_STOP && r.ok(); f = r.NextField()) {
+  for (;;) {
+    int64_t foff = r.offset();
+    Reader::Field f = r.NextField();
+    if (f.type == T_STOP || !r.ok()) break;
+    w.top_fields.push_back({f.id, foff});
     if (f.id == FMD_FOOTER_INDEX_POINTER) { w.already_indexed = true; r.Skip(f.type); continue; }
     if (f.id == FMD_SCHEMA && f.type == T_LIST) {
       Reader::ListHdr sl = r.List();  // list<SchemaElement>, DFS pre-order
@@ -368,6 +381,16 @@ int main(int argc, char** argv) {
                           static_cast<int64_t>(orig_hdr_len);
     const int64_t fmd_length = static_cast<int64_t>(footer.size()) + shift;
 
+    // field_offsets: byte offset of every present top-level FileMetaData field in
+    // the NEW footer. The pointer is at 0; the (rewritten) original first field
+    // moves to just after the pointer; the rest shift by the fixed prefix.
+    std::vector<std::pair<int16_t, int64_t>> field_offsets;
+    field_offsets.push_back({FMD_FOOTER_INDEX_POINTER, 0});
+    for (const auto& tf : w.top_fields) {
+      int64_t no = (tf.second == 0) ? static_cast<int64_t>(pointer.size()) : tf.second + shift;
+      field_offsets.push_back({tf.first, no});
+    }
+
     // 3. column_chunk_offsets (shifted into the new FileMetaData).
     std::vector<int64_t> cco;
     cco.reserve(w.chunk_offsets.size());
@@ -439,6 +462,7 @@ int main(int argc, char** argv) {
     idx.I32Field(1, w.columns);                  // num_leaf_columns
     idx.I32Field(2, w.row_groups);               // num_row_groups
     idx.Binary(3, PackBytes(cco, cbw));          // column_chunk_offsets
+    idx.MapI16I64Field(4, field_offsets);        // field_offsets
     idx.Field(5, T_STRUCT);                      // schema_layout
     int16_t s_sl = idx.StructBegin();
       idx.I32Field(1, N);                        // num_schema_elements
@@ -500,6 +524,7 @@ int main(int argc, char** argv) {
                 static_cast<long long>(fmd_length));
     std::printf("  index_blob           %zu\n", index_blob.size());
     std::printf("    column_chunk_offsets %d B/entry x %zu entries\n", cbw, cco.size());
+    std::printf("    field_offsets        %zu top-level fields\n", field_offsets.size());
     std::printf("    schema offsets       %d B/entry x %d elements\n", obw, N);
     std::printf("    name_hash_table      %u slots x %d B (FNV-1a-64, linear probe)\n",
                 num_slots, slot_bytes);
