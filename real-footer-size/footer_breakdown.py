@@ -142,7 +142,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=ROOT / "corpus.json")
     parser.add_argument("--data", type=Path, default=ROOT / "data")
-    parser.add_argument("--output", type=Path, default=ROOT / "footer-breakdown.svg")
+    parser.add_argument("--output", type=Path, default=ROOT / "footer-components.svg")
     parser.add_argument("--suffix-limit", type=int, default=16)
     parser.add_argument(
         "--modular-converter",

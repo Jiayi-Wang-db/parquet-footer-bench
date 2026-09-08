@@ -34,7 +34,7 @@ cmake --build build -j --target modular_footer_convert
 
 ![Normalized footer-size comparison](footer-size.svg)
 
-![Footer component breakdown](footer-breakdown.svg)
+![Footer component breakdown](footer-components.svg)
 
 Downloads use an atomic `.part` file and land in the gitignored `real-footer-size/data/` directory.
 Pass one or more dataset names to either command to operate on a subset.
@@ -75,7 +75,7 @@ table), so their statistics policies are directly comparable.
 
 ## Component breakdown
 
-`footer-breakdown.svg` keeps the total-size graph separate and divides both representations into
+`footer-components.svg` keeps the total-size graph separate and divides both representations into
 `path_in_schema`, row-group statistics, schema, placement, key/value metadata, and residual
 framing. Placement covers offsets, sizes, codecs, and physical types. The OSS split uses
 progressive clearing: it removes every path, every `ColumnMetaData.statistics`, then
