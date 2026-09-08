@@ -94,3 +94,19 @@ format effect by holding the codec constant.
 On a **narrow** footer (e.g. yellow_tripdata, 19 cols x 3 rg) all three are within
 a few microseconds — fixed overhead dominates, so narrow footers are not where
 footer decoding matters.
+
+## Projection sweep
+
+`--sweep` times projected resolution across a geometric range of column counts
+(1, 2, 4, … C) and prints CSV; `plot_sweep.py` renders it to a log-log SVG:
+
+```sh
+./footer_decode_bench input.jt.parquet --sweep input.modular \
+    | python3 plot_sweep.py "hits: 105 cols x 226 row groups" > projection_sweep.svg
+```
+
+`projection_sweep.svg` (hits) makes the scaling visible: **walk** is a nearly flat
+line near the top (it visits every chunk regardless of projection), while **index**
+and **modular** are straight rising lines (O(projected)). The gap is a fan that
+opens wide at a 1-column projection (~85x) and closes toward full projection
+(~1.5x) — both layouts turn footer decode from O(all columns) into O(projected).

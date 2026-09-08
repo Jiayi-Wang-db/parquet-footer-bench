@@ -44,6 +44,7 @@
 //   ./footer_decode_bench input.jt.parquet [num_projected] [input.modular]
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -472,12 +473,20 @@ std::string ReadWhole(const std::string& path) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: %s file.jumptable.parquet [num_projected] [file.modular]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s file.jumptable.parquet [num_projected|--sweep] [file.modular]\n",
+                 argv[0]);
     return 2;
   }
   const std::string jt_path = argv[1];
-  const int proj = argc >= 3 ? std::atoi(argv[2]) : 1;
-  const std::string mod_path = argc >= 4 ? argv[3] : "";
+  bool sweep = false;
+  int proj = 1;
+  std::string mod_path;
+  for (int i = 2; i < argc; ++i) {
+    std::string a = argv[i];
+    if (a == "--sweep") sweep = true;
+    else if (!a.empty() && std::isdigit(static_cast<unsigned char>(a[0]))) proj = std::atoi(a.c_str());
+    else mod_path = a;
+  }
   try {
     std::string jt = ReadWhole(jt_path);
     if (jt.size() < 8 || std::memcmp(jt.data() + jt.size() - 4, "PAR1", 4) != 0)
@@ -523,6 +532,25 @@ int main(int argc, char** argv) {
     std::string mod;
     ModularCtx ctx;
     if (have_mod) { mod = ReadWhole(mod_path); ctx = ModularSetup(mod, C, G); }
+
+    // Sweep mode: time projected resolution across a geometric range of column
+    // counts (1, 2, 4, ... C) and emit CSV for plotting.
+    if (sweep) {
+      std::vector<int> ks;
+      for (int k = 1; k < C; k *= 2) ks.push_back(k);
+      ks.push_back(C);
+      std::printf("projected,walk_us,index_us,modular_us\n");
+      for (int K : ks) {
+        std::vector<char> want(C, 0);
+        for (int c = 0; c < K; ++c) want[c] = 1;
+        double w = TimeUs([&] { auto v = WalkResolve(footer, want, C, G); if (v.empty()) std::abort(); });
+        double i = TimeUs([&] { auto v = IndexResolve(footer, want, C, G, cco, bpe); if (v.empty()) std::abort(); });
+        double m = 0;
+        if (have_mod) m = TimeUs([&] { auto v = ModularResolve(ctx, want, C, G); if (v.empty()) std::abort(); });
+        std::printf("%d,%.3f,%.3f,%.3f\n", K, w, i, m);
+      }
+      return 0;
+    }
 
     const int K = std::max(1, std::min(proj, C));
     std::vector<char> want_proj(C, 0), want_all(C, 1);
