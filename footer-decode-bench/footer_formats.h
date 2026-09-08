@@ -1,0 +1,485 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+// footer_formats.h -- the format-decoding layer, built on thrift_codec.h.
+//
+// Every footer variant is a Resolver: given a column projection, return the
+// {placement + statistics} each projected chunk resolves to. All four share the
+// same API so the driver treats them uniformly.
+//
+// min/max are returned as spans (min = min_a ++ min_b) into a persistent buffer,
+// not owned strings -- so the lean readers (walk / index / modular) never copy
+// or reconstruct stat bytes, and the benchmark measures decode work, not the
+// allocator. A modular bound is two segments (prefix + suffix); the others are
+// one. `standard` deliberately materializes everything (its modeled cost) into a
+// stable member and points its spans there.
+
+#ifndef PFB_FOOTER_FORMATS_H_
+#define PFB_FOOTER_FORMATS_H_
+
+#include <cstdint>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "thrift_codec.h"
+
+namespace fdb {
+
+// Compare two segmented byte values (a1 ++ b1) vs (a2 ++ b2) without materializing.
+inline bool SegEqual(Span a1, Span b1, Span a2, Span b2) {
+  if (static_cast<size_t>(a1.size) + b1.size != static_cast<size_t>(a2.size) + b2.size) return false;
+  size_t n = static_cast<size_t>(a1.size) + b1.size;
+  for (size_t i = 0; i < n; ++i) {
+    char c1 = i < a1.size ? a1.data[i] : b1.data[i - a1.size];
+    char c2 = i < a2.size ? a2.data[i] : b2.data[i - a2.size];
+    if (c1 != c2) return false;
+  }
+  return true;
+}
+
+// What every resolver returns per projected chunk: placement + statistics.
+// min/max are spans into a buffer the resolver keeps alive.
+struct Loc {
+  int64_t off = 0, size = 0;
+  bool has_null = false; int64_t null_count = 0;
+  bool has_mm = false;
+  Span min_a, min_b, max_a, max_b;  // min = min_a ++ min_b, max = max_a ++ max_b
+  bool operator==(const Loc& o) const {
+    if (off != o.off || size != o.size || has_null != o.has_null) return false;
+    if (has_null && null_count != o.null_count) return false;
+    if (has_mm != o.has_mm) return false;
+    if (has_mm && (!SegEqual(min_a, min_b, o.min_a, o.min_b) ||
+                   !SegEqual(max_a, max_b, o.max_a, o.max_b)))
+      return false;
+    return true;
+  }
+};
+using Placement = std::vector<Loc>;
+
+// Field ids we navigate.
+enum {  // FileMetaData / RowGroup / ColumnChunk / ColumnMetaData / Statistics
+  FMD_SCHEMA = 2, FMD_ROW_GROUPS = 4, FMD_FOOTER_INDEX_POINTER = 10, RG_COLUMNS = 1,
+  CC_META_DATA = 3, CM_TOTAL_COMPRESSED = 7, CM_DATA_PAGE_OFFSET = 9, CM_STATISTICS = 12,
+  ST_MAX_DEP = 1, ST_MIN_DEP = 2, ST_NULL_COUNT = 3, ST_MAX_VALUE = 5, ST_MIN_VALUE = 6,
+};
+enum {  // FileMetadataFooterIndex (jump table)
+  IDX_NUM_LEAF = 1, IDX_NUM_RG = 2, IDX_CHUNK_OFFSETS = 3,
+};
+enum {  // ModularFooter
+  K_PLACEMENT = 1, K_ROW_GROUP_STATISTICS = 2, MOD_DIRECTORY = 6,
+  DIR_KIND = 1, DIR_LOCATION = 2, LOC_OFFSET = 1,
+  PLACE_DATA_PAGE_OFFSETS = 1, PLACE_TOTAL_COMPRESSED = 4,
+  CS_NULL_COUNTS = 1, CS_MINMAX_PREFIXES = 2, CS_MIN_SUFFIXES = 3, CS_MAX_SUFFIXES = 4,
+  RGS_COLUMN_OFFSETS = 1,
+  AP_DATA = 1, AP_PARAMS = 4, PARAMS_BITSET = 1, PARAMS_PRESENT_INDEX = 2,
+  BITSET_WIDTH = 1, PI_NUM_PRESENT = 1, PI_POS_WIDTH = 2, PI_VAL_WIDTH = 3,
+};
+
+// The common interface. C x G = the chunk grid; a projection is a per-column mask.
+class Resolver {
+ public:
+  Resolver(int columns, int row_groups) : C(columns), G(row_groups) {}
+  virtual ~Resolver() = default;
+  virtual std::string name() const = 0;
+  virtual Placement Resolve(const std::vector<char>& want) const = 0;
+
+ protected:
+  int C, G;
+};
+
+// Emit projected chunks in canonical (column-major, row-group-minor) order.
+inline Placement Gather(const std::vector<Loc>& grid, const std::vector<char>& want, int C, int G) {
+  Placement out;
+  for (int c = 0; c < C; ++c)
+    if (want[c]) for (int g = 0; g < G; ++g) out.push_back(grid[static_cast<size_t>(c) * G + g]);
+  return out;
+}
+
+// ============================================================ nested-footer decode
+// Decode a Statistics struct into a Loc's stat fields (min/max as spans into the
+// reader's buffer). Deprecated (1/2) are used only when the current fields (5/6)
+// are absent, matching how footers are written.
+inline void ReadStatistics(Reader& r, Loc& L) {
+  Span mnd, mxd, mnv, mxv;
+  bool hmnd = false, hmxd = false, hmnv = false, hmxv = false;
+  int16_t s = r.StructBegin();
+  for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
+    if (f.id == ST_MAX_DEP) { mxd = r.BinarySpan(); hmxd = true; }
+    else if (f.id == ST_MIN_DEP) { mnd = r.BinarySpan(); hmnd = true; }
+    else if (f.id == ST_NULL_COUNT) { L.null_count = r.I64(); L.has_null = true; }
+    else if (f.id == ST_MAX_VALUE) { mxv = r.BinarySpan(); hmxv = true; }
+    else if (f.id == ST_MIN_VALUE) { mnv = r.BinarySpan(); hmnv = true; }
+    else r.Skip(f.type);
+  }
+  r.StructEnd(s);
+  if ((hmnv || hmnd) && (hmxv || hmxd)) {
+    L.has_mm = true;
+    L.min_a = hmnv ? mnv : mnd;
+    L.max_a = hmxv ? mxv : mxd;
+  }
+}
+// Decode one ColumnChunk (cursor at the struct start) -> placement + stats.
+inline Loc ReadColumnInfo(Reader& r) {
+  Loc L;
+  int16_t s = r.StructBegin();
+  for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
+    if (f.id == CC_META_DATA && f.type == T_STRUCT) {
+      int16_t s2 = r.StructBegin();
+      for (Reader::Field g = r.NextField(); g.type != T_STOP; g = r.NextField()) {
+        if (g.id == CM_TOTAL_COMPRESSED) L.size = r.I64();
+        else if (g.id == CM_DATA_PAGE_OFFSET) L.off = r.I64();
+        else if (g.id == CM_STATISTICS && g.type == T_STRUCT) ReadStatistics(r, L);
+        else r.Skip(g.type);
+      }
+      r.StructEnd(s2);
+    } else {
+      r.Skip(f.type);
+    }
+  }
+  r.StructEnd(s);
+  return L;
+}
+
+// ------- standard: full Thrift materialization (a generated-Thrift reader, e.g.
+// parquet-java's). Decodes the ENTIRE FileMetaData into an owned value tree kept
+// in a member, then points its spans there. Materializes everything regardless
+// of projection -- that allocation IS the cost it models.
+class StandardResolver : public Resolver {
+ public:
+  StandardResolver(const std::string& footer, int C, int G) : Resolver(C, G), footer_(footer) {}
+  std::string name() const override { return "standard"; }
+  Placement Resolve(const std::vector<char>& want) const override {
+    Reader r(footer_.data(), footer_.size());
+    tree_ = DecodeValue(r, T_STRUCT);  // materialized; stays alive as a member
+    std::vector<Loc> grid(static_cast<size_t>(C) * G);
+    if (const Value* rgs = tree_.field(FMD_ROW_GROUPS)) {
+      for (int g = 0; g < static_cast<int>(rgs->items.size()) && g < G; ++g) {
+        const Value* cols = rgs->items[g].field(RG_COLUMNS);
+        if (!cols) continue;
+        for (int c = 0; c < static_cast<int>(cols->items.size()) && c < C; ++c) {
+          const Value* md = cols->items[c].field(CC_META_DATA);
+          Loc L;
+          if (md) {
+            if (const Value* v = md->field(CM_DATA_PAGE_OFFSET)) L.off = v->num;
+            if (const Value* v = md->field(CM_TOTAL_COMPRESSED)) L.size = v->num;
+            if (const Value* st = md->field(CM_STATISTICS)) {
+              if (const Value* nc = st->field(ST_NULL_COUNT)) { L.has_null = true; L.null_count = nc->num; }
+              const Value* mn = st->field(ST_MIN_VALUE); if (!mn) mn = st->field(ST_MIN_DEP);
+              const Value* mx = st->field(ST_MAX_VALUE); if (!mx) mx = st->field(ST_MAX_DEP);
+              if (mn && mx) {
+                L.has_mm = true;
+                L.min_a = {mn->bin.data(), static_cast<uint32_t>(mn->bin.size())};
+                L.max_a = {mx->bin.data(), static_cast<uint32_t>(mx->bin.size())};
+              }
+            }
+          }
+          grid[static_cast<size_t>(c) * G + g] = L;
+        }
+      }
+    }
+    return Gather(grid, want, C, G);
+  }
+
+ private:
+  const std::string& footer_;
+  mutable Value tree_;  // holds the materialized values the spans point into
+};
+
+// ------- walk: today's reader -- walk every row group and column chunk, decode
+// the projected ones, skip the rest.
+class WalkResolver : public Resolver {
+ public:
+  WalkResolver(const std::string& footer, int C, int G) : Resolver(C, G), footer_(footer) {}
+  std::string name() const override { return "walk"; }
+  Placement Resolve(const std::vector<char>& want) const override {
+    std::vector<Loc> grid(static_cast<size_t>(C) * G);
+    Reader r(footer_.data(), footer_.size());
+    for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
+      if (f.id != FMD_ROW_GROUPS || f.type != T_LIST) { r.Skip(f.type); continue; }
+      Reader::ListHdr rgs = r.List();
+      for (int32_t g = 0; g < rgs.size; ++g) {
+        int16_t sg = r.StructBegin();
+        for (Reader::Field gf = r.NextField(); gf.type != T_STOP; gf = r.NextField()) {
+          if (gf.id != RG_COLUMNS || gf.type != T_LIST) { r.Skip(gf.type); continue; }
+          Reader::ListHdr cols = r.List();
+          for (int32_t c = 0; c < cols.size; ++c) {
+            if (want[c]) grid[static_cast<size_t>(c) * G + g] = ReadColumnInfo(r);
+            else r.Skip(T_STRUCT);
+          }
+        }
+        r.StructEnd(sg);
+      }
+    }
+    return Gather(grid, want, C, G);
+  }
+
+ private:
+  const std::string& footer_;
+};
+
+// The jump-table index (FileMetaData.footer_index_pointer -> FileMetadataFooterIndex).
+struct FooterIndex {
+  int columns = 0, row_groups = 0, bytes_per_entry = 0;
+  int64_t fmd_length = 0;
+  std::string column_chunk_offsets;
+};
+inline FooterIndex ReadFooterIndex(const std::string& footer) {
+  FooterIndex fi;
+  {  // footer_index_pointer (field 10): version + 3 LE i64; take file_meta_data_length.
+    Reader r(footer.data(), footer.size());
+    for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
+      if (f.id == FMD_FOOTER_INDEX_POINTER && f.type == T_BINARY) {
+        std::string p = r.Binary();
+        if (p.size() < 25 || static_cast<uint8_t>(p[0]) != 1)
+          throw std::runtime_error("unsupported footer_index_pointer version");
+        std::memcpy(&fi.fmd_length, p.data() + 17, 8);
+        break;
+      }
+      r.Skip(f.type);
+    }
+  }
+  if (fi.fmd_length <= 0)
+    throw std::runtime_error("no footer_index_pointer -- run parquet_to_jumptable first");
+  Reader r(footer.data() + fi.fmd_length, footer.size() - static_cast<size_t>(fi.fmd_length));
+  for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
+    if (f.id == IDX_NUM_LEAF && f.type == T_I32) fi.columns = r.I32();
+    else if (f.id == IDX_NUM_RG && f.type == T_I32) fi.row_groups = r.I32();
+    else if (f.id == IDX_CHUNK_OFFSETS && f.type == T_BINARY) fi.column_chunk_offsets = r.Binary();
+    else r.Skip(f.type);
+  }
+  if (fi.column_chunk_offsets.empty() || fi.columns == 0 || fi.row_groups == 0)
+    throw std::runtime_error("failed to decode FileMetadataFooterIndex");
+  fi.bytes_per_entry = static_cast<int>(fi.column_chunk_offsets.size() /
+                                        (static_cast<size_t>(fi.row_groups) * (fi.columns + 1)));
+  return fi;
+}
+
+// ------- index: seek via column_chunk_offsets to each projected chunk, decode
+// only those (placement + stats spans into the footer).
+class IndexResolver : public Resolver {
+ public:
+  IndexResolver(const std::string& footer, const FooterIndex& fi)
+      : Resolver(fi.columns, fi.row_groups), footer_(footer),
+        cco_(fi.column_chunk_offsets), bpe_(fi.bytes_per_entry) {}
+  std::string name() const override { return "index"; }
+  Placement Resolve(const std::vector<char>& want) const override {
+    const uint8_t* cco = reinterpret_cast<const uint8_t*>(cco_.data());
+    int stride = C + 1;
+    Placement out;
+    for (int c = 0; c < C; ++c) {
+      if (!want[c]) continue;
+      for (int g = 0; g < G; ++g) {
+        int64_t bo = 0;
+        const uint8_t* p = cco + (static_cast<size_t>(g) * stride + c) * bpe_;
+        for (int b = 0; b < bpe_; ++b) bo |= static_cast<int64_t>(p[b]) << (8 * b);
+        Reader r(footer_.data() + bo, footer_.size() - static_cast<size_t>(bo));
+        out.push_back(ReadColumnInfo(r));
+      }
+    }
+    return out;
+  }
+
+ private:
+  const std::string& footer_;
+  std::string cco_;
+  int bpe_;
+};
+
+// ============================================================== modular decode
+// A parsed ArrayPage: the packed bytes as a Span into the modular buffer (no
+// copy) plus encoding params. ExtractBits over-reads up to 9 bytes past the last
+// bit, which stays inside the buffer -- the packed arrays are always followed by
+// more modules / the root / the trailer -- and the over-read bits are masked off.
+struct ArrayPage { Span data; int encoding = -1; int np = 0; int wpos = 0; int wval = 0; };
+inline ArrayPage ParseArrayPage(Reader& r) {
+  ArrayPage ap;
+  int16_t s = r.StructBegin();
+  for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
+    if (f.id == AP_DATA && f.type == T_BINARY) {
+      ap.data = r.BinarySpan();
+    } else if (f.id == 2 && f.type == T_I32) {
+      ap.encoding = r.I32();
+    } else if (f.id == AP_PARAMS && f.type == T_STRUCT) {
+      int16_t s2 = r.StructBegin();
+      for (Reader::Field g = r.NextField(); g.type != T_STOP; g = r.NextField()) {
+        if (g.id == PARAMS_BITSET && g.type == T_STRUCT) {
+          int16_t s3 = r.StructBegin();
+          for (Reader::Field h = r.NextField(); h.type != T_STOP; h = r.NextField()) {
+            if (h.id == BITSET_WIDTH) ap.wval = r.U8();
+            else if (h.id == 2) ap.np = r.I32();
+            else r.Skip(h.type);
+          }
+          r.StructEnd(s3);
+        } else if (g.id == PARAMS_PRESENT_INDEX && g.type == T_STRUCT) {
+          int16_t s3 = r.StructBegin();
+          for (Reader::Field h = r.NextField(); h.type != T_STOP; h = r.NextField()) {
+            if (h.id == PI_NUM_PRESENT) ap.np = r.I32();
+            else if (h.id == PI_POS_WIDTH) ap.wpos = r.U8();
+            else if (h.id == PI_VAL_WIDTH) ap.wval = r.U8();
+            else r.Skip(h.type);
+          }
+          r.StructEnd(s3);
+        } else r.Skip(g.type);
+      }
+      r.StructEnd(s2);
+    } else {
+      r.Skip(f.type);
+    }
+  }
+  r.StructEnd(s);
+  return ap;
+}
+inline int64_t BitsetAt(const ArrayPage& ap, size_t i) {
+  return static_cast<int64_t>(ExtractBits(reinterpret_cast<const uint8_t*>(ap.data.data), i, ap.wval));
+}
+inline void PresentInt(const ArrayPage& ap, int G, std::vector<char>& has, std::vector<int64_t>& val) {
+  const uint8_t* d = reinterpret_cast<const uint8_t*>(ap.data.data);
+  const uint8_t* vd = d + (static_cast<size_t>(ap.np) * ap.wpos + 7) / 8;
+  for (int i = 0; i < ap.np; ++i) {
+    int p = static_cast<int>(ExtractBits(d, i, ap.wpos));
+    if (p >= 0 && p < G) { has[p] = 1; val[p] = static_cast<int64_t>(ExtractBits(vd, i, ap.wval)); }
+  }
+}
+// Fill has[G]/out[G] with spans into the modular buffer (no copy).
+inline void PresentBytes(const ArrayPage& ap, int G, std::vector<char>& has, std::vector<Span>& out) {
+  const uint8_t* d = reinterpret_cast<const uint8_t*>(ap.data.data);
+  size_t pos_bytes = (static_cast<size_t>(ap.np) * ap.wpos + 7) / 8;
+  const uint8_t* cd = d + pos_bytes;
+  size_t cum_bytes = ((static_cast<size_t>(ap.np) + 1) * ap.wval + 7) / 8;
+  const char* bytes = ap.data.data + pos_bytes + cum_bytes;
+  for (int i = 0; i < ap.np; ++i) {
+    int p = static_cast<int>(ExtractBits(d, i, ap.wpos));
+    uint64_t c0 = ExtractBits(cd, i, ap.wval), c1 = ExtractBits(cd, i + 1, ap.wval);
+    if (p >= 0 && p < G) { has[p] = 1; out[p] = {bytes + c0, static_cast<uint32_t>(c1 - c0)}; }
+  }
+}
+
+// ------- modular: placement from the column-major bit-packed PlacementModule,
+// statistics from a separate ColumnStatistics module. min/max are prefix + suffix
+// spans into the modular buffer -- reconstructed only logically, never copied.
+class ModularResolver : public Resolver {
+ public:
+  ModularResolver(const std::string& mod, int C, int G) : Resolver(C, G), mod_(mod) {
+    if (mod.size() < 12 || std::memcmp(mod.data() + mod.size() - 4, "MFT1", 4) != 0)
+      throw std::runtime_error("modular file missing MFT1 trailer -- rebuild parquet_to_modular");
+    int64_t root_off = 0;
+    std::memcpy(&root_off, mod.data() + mod.size() - 12, 8);
+    int64_t place_off = -1, stats_off = -1;
+    Reader rr(mod.data() + root_off, mod.size() - static_cast<size_t>(root_off));
+    for (Reader::Field f = rr.NextField(); f.type != T_STOP; f = rr.NextField()) {
+      if (f.id != MOD_DIRECTORY || f.type != T_LIST) { rr.Skip(f.type); continue; }
+      Reader::ListHdr d = rr.List();
+      for (int32_t i = 0; i < d.size; ++i) {
+        int32_t kind = -1; int64_t off = 0;
+        int16_t s = rr.StructBegin();
+        for (Reader::Field g = rr.NextField(); g.type != T_STOP; g = rr.NextField()) {
+          if (g.id == DIR_KIND) kind = rr.I32();
+          else if (g.id == DIR_LOCATION && g.type == T_STRUCT) {
+            int16_t s2 = rr.StructBegin();
+            for (Reader::Field h = rr.NextField(); h.type != T_STOP; h = rr.NextField()) {
+              if (h.id == LOC_OFFSET) off = rr.I64(); else rr.Skip(h.type);
+            }
+            rr.StructEnd(s2);
+          } else rr.Skip(g.type);
+        }
+        rr.StructEnd(s);
+        if (kind == K_PLACEMENT) place_off = off;
+        else if (kind == K_ROW_GROUP_STATISTICS) stats_off = off;
+      }
+    }
+    if (place_off < 0) throw std::runtime_error("modular footer has no placement module");
+    Reader pr(mod.data() + place_off, mod.size() - static_cast<size_t>(place_off));
+    for (Reader::Field f = pr.NextField(); f.type != T_STOP; f = pr.NextField()) {
+      if (f.id == PLACE_DATA_PAGE_OFFSETS && f.type == T_STRUCT) dpo_ = ParseArrayPage(pr);
+      else if (f.id == PLACE_TOTAL_COMPRESSED && f.type == T_STRUCT) tcs_ = ParseArrayPage(pr);
+      else pr.Skip(f.type);
+    }
+    col_off_.assign(C + 1, 0);
+    if (stats_off >= 0) {
+      have_stats_ = true;
+      Reader sr(mod.data() + stats_off, mod.size() - static_cast<size_t>(stats_off));
+      for (Reader::Field f = sr.NextField(); f.type != T_STOP; f = sr.NextField()) {
+        if (f.id == RGS_COLUMN_OFFSETS && f.type == T_STRUCT) {
+          ArrayPage co = ParseArrayPage(sr);
+          for (int c = 0; c <= C; ++c) col_off_[c] = BitsetAt(co, c);
+        } else sr.Skip(f.type);
+      }
+    }
+  }
+  std::string name() const override { return "modular"; }
+  Placement Resolve(const std::vector<char>& want) const override {
+    Placement out;
+    for (int c = 0; c < C; ++c) {
+      if (!want[c]) continue;
+      ColStats cs;
+      if (have_stats_) cs = DecodeColumnStatistics(col_off_[c], col_off_[c + 1] - col_off_[c]);
+      for (int g = 0; g < G; ++g) {
+        size_t cc = static_cast<size_t>(c) * G + g;
+        Loc L;
+        L.off = BitsetAt(dpo_, cc);
+        L.size = BitsetAt(tcs_, cc);
+        if (have_stats_) {
+          L.has_null = cs.has_null[g]; L.null_count = cs.null_count[g];
+          if (cs.has_mm[g]) {
+            L.has_mm = true;
+            L.min_a = cs.pref[g]; L.min_b = cs.minsuf[g];  // min = prefix ++ min_suffix
+            L.max_a = cs.pref[g]; L.max_b = cs.maxsuf[g];  // max = prefix ++ max_suffix
+          }
+        }
+        out.push_back(L);
+      }
+    }
+    return out;
+  }
+
+ private:
+  struct ColStats {
+    std::vector<char> has_null; std::vector<int64_t> null_count;
+    std::vector<char> has_mm;
+    std::vector<Span> pref, minsuf, maxsuf;  // spans into mod_
+  };
+  ColStats DecodeColumnStatistics(int64_t off, int64_t len) const {
+    ColStats cs;
+    cs.has_null.assign(G, 0); cs.null_count.assign(G, 0);
+    cs.has_mm.assign(G, 0);
+    cs.pref.assign(G, Span{}); cs.minsuf.assign(G, Span{}); cs.maxsuf.assign(G, Span{});
+    if (len <= 0) return cs;
+    std::vector<char> hp(G, 0), hms(G, 0), hxs(G, 0);
+    Reader r(mod_.data() + off, static_cast<size_t>(len));
+    for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
+      if (f.type != T_STRUCT) { r.Skip(f.type); continue; }
+      if (f.id == CS_NULL_COUNTS) { ArrayPage ap = ParseArrayPage(r); PresentInt(ap, G, cs.has_null, cs.null_count); }
+      else if (f.id == CS_MINMAX_PREFIXES) { ArrayPage ap = ParseArrayPage(r); PresentBytes(ap, G, hp, cs.pref); }
+      else if (f.id == CS_MIN_SUFFIXES) { ArrayPage ap = ParseArrayPage(r); PresentBytes(ap, G, hms, cs.minsuf); }
+      else if (f.id == CS_MAX_SUFFIXES) { ArrayPage ap = ParseArrayPage(r); PresentBytes(ap, G, hxs, cs.maxsuf); }
+      else r.Skip(f.type);
+    }
+    for (int g = 0; g < G; ++g) cs.has_mm[g] = hp[g] && hms[g] && hxs[g];
+    return cs;
+  }
+
+  const std::string& mod_;
+  ArrayPage dpo_, tcs_;
+  std::vector<int64_t> col_off_;
+  bool have_stats_ = false;
+};
+
+}  // namespace fdb
+
+#endif  // PFB_FOOTER_FORMATS_H_

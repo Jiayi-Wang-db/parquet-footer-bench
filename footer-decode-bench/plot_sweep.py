@@ -32,12 +32,15 @@ title = sys.argv[1] if len(sys.argv) > 1 else "footer decode: projection sweep"
 lines = [ln.strip() for ln in sys.stdin if ln.strip()]
 rows = [ln.split(",") for ln in lines[1:]]  # skip header
 xs = [int(r[0]) for r in rows]
-cols = [
-    ("walk", [float(r[1]) for r in rows], "#64748b"),
-    ("index (jump table)", [float(r[2]) for r in rows], "#2563eb"),
-    ("modular", [float(r[3]) for r in rows], "#9333ea"),
-]
-cols = [c for c in cols if any(v > 0 for v in c[1])]  # drop modular if not measured
+header = lines[0].split(",")  # projected,<name>_us,...
+palette = {"standard": "#dc2626", "walk": "#64748b", "index": "#2563eb", "modular": "#9333ea"}
+cols = []
+for j, h in enumerate(header[1:], start=1):
+    label = h[:-3] if h.endswith("_us") else h  # strip _us
+    color = palette.get(label, "#0891b2")
+    disp = "index (jump table)" if label == "index" else label
+    cols.append((disp, [float(r[j]) for r in rows], color))
+cols = [c for c in cols if any(v > 0 for v in c[1])]  # drop unmeasured (e.g. no modular)
 
 W, H = 900, 560
 L, R, T, B = 90, 260, 70, 70          # margins (R leaves room for the legend)
