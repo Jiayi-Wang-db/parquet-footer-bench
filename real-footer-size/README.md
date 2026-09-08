@@ -19,9 +19,13 @@ python3 real-footer-size/footer_size.py
 
 # Regenerate the checked-in visualization.
 python3 real-footer-size/visualize.py
+
+# Regenerate the separate stacked component visualization.
+python3 real-footer-size/footer_breakdown.py
 ```
 
-Build the dependency-free modular converter before running the last two commands:
+Build the dependency-free modular converter before running the footer measurement or either
+visualization command:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -29,6 +33,8 @@ cmake --build build -j --target modular_footer_convert
 ```
 
 ![Normalized footer-size comparison](footer-size.svg)
+
+![Footer component breakdown](footer-breakdown.svg)
 
 Downloads use an atomic `.part` file and land in the gitignored `real-footer-size/data/` directory.
 Pass one or more dataset names to either command to operate on a subset.
@@ -66,6 +72,18 @@ side would not be an apples-to-apples footer-size comparison.
 
 Both prefix-based representations cap each min/max suffix at the configured limit (16 bytes in the
 table), so their statistics policies are directly comparable.
+
+## Component breakdown
+
+`footer-breakdown.svg` keeps the total-size graph separate and divides both representations into
+schema, placement, row-group statistics, and other bytes. The OSS split uses progressive clearing:
+it removes every `ColumnMetaData.statistics`, then `FileMetaData.row_groups`, then
+`FileMetaData.schema`. The serialized-size difference at each step is assigned to that component,
+so the four components add up exactly despite compact-Thrift field-header interactions.
+
+For modular footers, schema and placement are the corresponding modules. Statistics include both
+the per-column descriptors and the row-group-statistics directory. Other includes file metadata,
+the modular root directory, and framing. Page indexes are excluded from both representations.
 
 ## Common-prefix sharing versus truncation
 

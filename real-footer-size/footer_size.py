@@ -150,6 +150,31 @@ def measure(path, suffix_limit):
     }
 
 
+def oss_breakdown(path):
+    """Split the OSS footer by progressively clearing fields; parts sum exactly."""
+    unused_file_bytes, standard = read_footer(path)
+    decoded = compact.decode(standard)
+    if compact.encode(decoded) != standard:
+        raise ValueError("compact-Thrift fidelity check failed for {}".format(path))
+
+    for metadata in column_metadata(decoded):
+        metadata[:] = [item for item in metadata if item[0] != 12]
+    without_stats = len(compact.encode(decoded))
+
+    decoded[:] = [item for item in decoded if item[0] != 4]
+    without_placement = len(compact.encode(decoded))
+
+    decoded[:] = [item for item in decoded if item[0] != 2]
+    other = len(compact.encode(decoded))
+    return {
+        "schema": without_placement - other,
+        "placement": without_stats - without_placement,
+        "statistics": len(standard) - without_stats,
+        "other": other,
+        "total": len(standard),
+    }
+
+
 def modular_measure(path, converter, suffix_limit):
     handle, output_name = tempfile.mkstemp(prefix="modular-footer-", suffix=".bin")
     os.close(handle)
@@ -166,20 +191,51 @@ def modular_measure(path, converter, suffix_limit):
             universal_newlines=True
         )
         values = {}
+        modules = {}
         for line in completed.stdout.splitlines():
             pieces = line.split()
             if len(pieces) == 2 and pieces[0] in ("modular_total_bytes", "column_chunks"):
                 values[pieces[0]] = int(pieces[1])
+            if len(pieces) == 3 and pieces[1].startswith("off=") and pieces[2].startswith("len="):
+                modules[pieces[0]] = {
+                    "offset": int(pieces[1].split("=", 1)[1]),
+                    "length": int(pieces[2].split("=", 1)[1]),
+                }
         measured_size = output.stat().st_size
         if values.get("modular_total_bytes") != measured_size:
             raise ValueError("converter output size does not match its report")
         return {
             "bytes": measured_size,
             "column_chunks": values.get("column_chunks"),
+            "modules": modules,
         }
     finally:
         if output.exists():
             output.unlink()
+
+
+def modular_breakdown(path, converter, suffix_limit):
+    measured = modular_measure(path, converter, suffix_limit)
+    modules = measured["modules"]
+    schema = modules.get("schema", {}).get("length", 0)
+    placement = modules.get("placement", {}).get("length", 0)
+    statistics = 0
+    stats = modules.get("row_group_stats")
+    if stats is not None:
+        preceding_end = max(
+            module["offset"] + module["length"]
+            for name, module in modules.items()
+            if module["offset"] < stats["offset"] and name != "row_group_stats"
+        )
+        statistics = stats["offset"] + stats["length"] - preceding_end
+    other = measured["bytes"] - schema - placement - statistics
+    return {
+        "schema": schema,
+        "placement": placement,
+        "statistics": statistics,
+        "other": other,
+        "total": measured["bytes"],
+    }
 
 
 def main():
