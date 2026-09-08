@@ -39,6 +39,9 @@ target_link_libraries(pfb_bench PRIVATE pfb_layouts)
 add_executable(modular_footer_convert modular-footer/parquet_to_modular.cc)
 target_include_directories(modular_footer_convert PRIVATE include)
 
+add_executable(jumptable_footer_convert jumptable-footer/parquet_to_jumptable.cc)
+add_executable(footer_decode_bench footer-decode-bench/footer_decode_bench.cc)
+
 enable_testing()
 add_executable(pfb_fidelity_test test/fidelity_test.cc)
 target_link_libraries(pfb_fidelity_test PRIVATE pfb_layouts)

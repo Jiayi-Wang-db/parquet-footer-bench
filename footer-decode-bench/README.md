@@ -110,3 +110,25 @@ line near the top (it visits every chunk regardless of projection), while **inde
 and **modular** are straight rising lines (O(projected)). The gap is a fan that
 opens wide at a 1-column projection (~85x) and closes toward full projection
 (~1.5x) — both layouts turn footer decode from O(all columns) into O(projected).
+
+## Real corpus sweeps
+
+`run_corpus.py` converts and sweeps all four files from `real-footer-size/corpus.json`, then writes
+one CSV and SVG per dataset under `results/`:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j --target jumptable_footer_convert modular_footer_convert footer_decode_bench
+python3 footer-decode-bench/run_corpus.py
+```
+
+The checked-in results were measured on one machine and should be used for relative trends, not as
+portable absolute latency. The modular inputs intentionally preserve full statistics because the
+benchmark verifies that all three layouts reconstruct identical min/max values before timing.
+
+| Dataset | Sweep |
+|---|---|
+| US Accidents | [SVG](results/us-accidents-00004-of-00007.svg) |
+| FineWeb 10BT | [SVG](results/fineweb-10bt-000.svg) |
+| Hacker News | [SVG](results/hacker-news-00000-of-00039.svg) |
+| Yellow Taxi | [SVG](results/yellow-tripdata-2025-01.svg) |
