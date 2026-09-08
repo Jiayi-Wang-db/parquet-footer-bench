@@ -428,18 +428,26 @@ int main(int argc, char** argv) {
       else path[i] = path[p] + '\0' + seg;
     }
 
-    // NameHashTable: open-addressed, linear probe, LE slot = element_ordinal + 1.
+    // NameHashTable: open-addressed, linear probe. Slot value (little-endian) =
+    // (discriminator << ordinal_bits) | (element_ordinal + 1); empty = all-zero.
+    // discriminator = the top `discriminator_bits` of the FNV-1a-64 hash, and the
+    // home slot = hash & (num_slots-1) -- matching the reference writer.
+    const int discriminator_bits = 8;
     const uint32_t num_slots = NextPow2(static_cast<uint32_t>(std::max(2, 2 * N)));
-    const int slot_bytes = (BitsFor(static_cast<uint64_t>(N)) + 7) / 8;
+    const int slot_bytes = (discriminator_bits + BitsFor(static_cast<uint64_t>(N)) + 7) / 8;
+    const int ordinal_bits = slot_bytes * 8 - discriminator_bits;
     std::string table(static_cast<size_t>(num_slots) * slot_bytes, '\0');
     for (int i = 0; i < N; ++i) {
-      uint32_t slot = static_cast<uint32_t>(Fnv1a64(path[i]) & (num_slots - 1));
+      uint64_t h = Fnv1a64(path[i]);
+      uint64_t disc = h >> (64 - discriminator_bits);
+      uint64_t val = (disc << ordinal_bits) | static_cast<uint64_t>(i + 1);
+      uint32_t home = static_cast<uint32_t>(h & (num_slots - 1));
       for (uint32_t probe = 0; probe < num_slots; ++probe) {
-        uint32_t s = (slot + probe) & (num_slots - 1);
+        uint32_t s = (home + probe) & (num_slots - 1);
         size_t at = static_cast<size_t>(s) * slot_bytes;
         bool empty = true;
         for (int b = 0; b < slot_bytes; ++b) if (table[at + b] != 0) { empty = false; break; }
-        if (empty) { PutLE(table, at, static_cast<uint64_t>(i + 1), slot_bytes); break; }
+        if (empty) { PutLE(table, at, val, slot_bytes); break; }
       }
     }
 
@@ -471,7 +479,8 @@ int main(int argc, char** argv) {
       idx.Field(4, T_STRUCT);                    // name_hash_table
       int16_t s_nht = idx.StructBegin();
         idx.I32Field(1, static_cast<int32_t>(num_slots));  // num_slots
-        idx.Binary(3, table);                    // table (discriminator_bits omitted = 0)
+        idx.I32Field(2, discriminator_bits);       // discriminator_bits
+        idx.Binary(3, table);                    // table
       idx.Stop(); idx.StructEnd(s_nht);
       idx.Field(5, T_STRUCT);                    // field_id_mapping (union)
       int16_t s_fim = idx.StructBegin();
@@ -526,8 +535,8 @@ int main(int argc, char** argv) {
     std::printf("    column_chunk_offsets %d B/entry x %zu entries\n", cbw, cco.size());
     std::printf("    field_offsets        %zu top-level fields\n", field_offsets.size());
     std::printf("    schema offsets       %d B/entry x %d elements\n", obw, N);
-    std::printf("    name_hash_table      %u slots x %d B (FNV-1a-64, linear probe)\n",
-                num_slots, slot_bytes);
+    std::printf("    name_hash_table      %u slots x %d B (FNV-1a-64, %d discriminator bits)\n",
+                num_slots, slot_bytes, discriminator_bits);
     std::printf("    field_id_mapping     %s\n", fim);
     std::printf("    has_non_ascii_names  %s\n", non_ascii ? "true" : "false");
     std::printf("footer_growth          +%zu bytes (%.1f%%)\n", new_footer.size() - footer_len,
