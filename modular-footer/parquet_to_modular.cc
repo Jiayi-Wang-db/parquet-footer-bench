@@ -847,11 +847,19 @@ int main(int argc, char** argv) {
       root.Stop(); root.StructEnd(s);
     }
     root.Stop();
-    place(root.bytes());
+    int64_t root_off = place(root.bytes());
 
     std::ofstream out_file(out_path, std::ios::binary | std::ios::trunc);
     if (!out_file) throw std::runtime_error("cannot open " + out_path + " for writing");
     out_file.write(out.data(), out.size());
+    // Navigability trailer: the root directory is written last, so record its
+    // absolute offset (LE i64) plus a magic. Additive -- the module layout and the
+    // reported modular_total_bytes are unchanged; it just lets a reader find the root.
+    char trailer[12];
+    for (int b = 0; b < 8; ++b)
+      trailer[b] = static_cast<char>((static_cast<uint64_t>(root_off) >> (8 * b)) & 0xFF);
+    std::memcpy(trailer + 8, "MFT1", 4);
+    out_file.write(trailer, 12);
     out_file.close();
 
     auto kind_name = [](int32_t k) -> const char* {
