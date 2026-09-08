@@ -26,7 +26,7 @@
 // (CMakeLists.txt target modular_footer_convert) and any C++17 compiler.
 //
 //   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-//   ./build/modular_footer_convert [--page-index] [--full-file]
+//   ./build/modular_footer_convert [--page-index] [--full-file] [--schema-index]
 //       input.parquet [output.modular]
 //
 // Translates every module the FileMetaData footer carries:
@@ -36,6 +36,14 @@
 //                          directory; null counts and min/max as PRESENT_INDEX,
 //                          min/max with common-prefix stripping)
 //   * file metadata      (created_by + key_value_metadata)
+//
+// With --schema-index it also emits the optional SCHEMA_INDEX module: an
+// open-addressed FNV-1a-64 name -> leaf-ordinal hash table (power-of-two slots at
+// ~0.7 load, 8 discriminator bits) plus per-element byte offsets into the schema
+// module, so a reader resolves K queried column names in O(K) instead of walking
+// every SchemaElement. leaf_element_indexes is omitted for a flat schema (leaf
+// ordinal c is element c + 1). Purely additive: readers that do not understand the
+// kind, or footers written without the flag, fall back to walking the schema.
 //
 // With --page-index it also emits the OFFSET_INDEX and COLUMN_INDEX modules, but
 // only when that page-index data is actually present and reachable: the blobs
@@ -669,8 +677,125 @@ static std::string BuildColumnIndexChunk(const std::string& blob, int trunc) {
 
 // Modular-footer ModuleKind values (ModularFooter.thrift).
 enum : int32_t { K_SCHEMA = 0, K_PLACEMENT = 1, K_ROW_GROUP_STATISTICS = 2,
-                 K_OFFSET_INDEX = 3, K_COLUMN_INDEX = 4, K_FILE_METADATA = 5 };
+                 K_OFFSET_INDEX = 3, K_COLUMN_INDEX = 4, K_FILE_METADATA = 5,
+                 K_SCHEMA_INDEX = 6 };
 struct DirEntry { int32_t kind; int64_t off; int64_t len; };
+
+// ------------------------------------------------- schema index (SchemaIndexModule)
+// Per-element view of the verbatim schema list, in DFS order: each element's byte
+// offset within the schema_span, its name, and num_children (0 == leaf).
+struct SchemaLayout {
+  std::vector<int64_t> span_off;
+  std::vector<std::string> name;
+  std::vector<int32_t> num_children;
+};
+
+static SchemaLayout ParseSchemaLayout(const char* span, size_t len) {
+  SchemaLayout sl;
+  Reader r(span, len);
+  Reader::ListHdr h = r.List();               // span begins with the list header
+  for (int32_t i = 0; i < h.size && r.ok(); ++i) {
+    sl.span_off.push_back(static_cast<int64_t>(r.cur() - span));
+    std::string nm; int32_t nc = 0;
+    int16_t s = r.StructBegin();
+    for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
+      if (f.id == 4 && f.type == T_BINARY) nm = r.Binary();       // name
+      else if (f.id == 5 && f.type == T_I32) nc = r.I32();        // num_children
+      else r.Skip(f.type);
+    }
+    r.StructEnd(s);
+    sl.name.push_back(std::move(nm));
+    sl.num_children.push_back(nc);
+  }
+  return sl;
+}
+
+static uint64_t Fnv1a64(const std::string& s) {
+  uint64_t h = 0xcbf29ce484222325ULL;
+  for (unsigned char c : s) { h ^= c; h *= 0x100000001b3ULL; }
+  return h;
+}
+static uint64_t NextPow2(uint64_t n) { uint64_t p = 1; while (p < n) p <<= 1; return p; }
+
+// Metrics reported for a built schema index.
+struct SchemaIndexInfo { bool flat = false; int slots = 0; int slot_bits = 0; bool non_ascii = false; };
+
+// Build a SchemaIndexModule from the schema layout. elements_base is the byte offset
+// of the first schema element within the SchemaModule blob (its field-1 list header
+// precedes the elements). Returns "" when there are no leaf columns to index.
+static std::string BuildSchemaIndex(const SchemaLayout& sl, int64_t elements_base,
+                                    SchemaIndexInfo* info) {
+  const int N = static_cast<int>(sl.name.size());
+  std::vector<int> parent(N, -1);             // DFS parent via the num_children stack
+  {
+    std::vector<std::pair<int, int>> st;
+    for (int i = 0; i < N; ++i) {
+      if (!st.empty()) { parent[i] = st.back().first; st.back().second--; }
+      if (sl.num_children[i] > 0) st.push_back({i, sl.num_children[i]});
+      while (!st.empty() && st.back().second == 0) st.pop_back();
+    }
+  }
+  auto lower = [](std::string x) {
+    for (char& c : x) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+    return x;
+  };
+  bool non_ascii = false;
+  for (const std::string& nm : sl.name)
+    for (unsigned char ch : nm) if (ch & 0x80) non_ascii = true;
+  std::vector<std::string> path(N);           // lowercase NUL-joined path, root excluded
+  for (int i = 1; i < N; ++i) {
+    std::string seg = lower(sl.name[i]);
+    int p = parent[i];
+    path[i] = (p <= 0) ? seg : path[p] + std::string(1, '\0') + seg;
+  }
+  std::vector<int> leaf_elem;                 // leaf ordinal -> element index (DFS order)
+  std::vector<uint64_t> leaf_hash;
+  for (int i = 1; i < N; ++i)
+    if (sl.num_children[i] == 0) { leaf_elem.push_back(i); leaf_hash.push_back(Fnv1a64(path[i])); }
+  const int leaves = static_cast<int>(leaf_elem.size());
+  if (leaves == 0) return {};
+
+  const int disc_bits = 8;                    // top hash bits held in each slot
+  const int ord_bits = pfb::BitWidth(static_cast<uint64_t>(leaves));  // holds leaf_ordinal + 1
+  const uint64_t target = (static_cast<uint64_t>(leaves) * 10 + 6) / 7;  // ceil(leaves / 0.7)
+  const uint64_t num_slots = NextPow2(target > 0 ? target : 1);
+  std::vector<uint64_t> table(num_slots, 0);  // 0 == empty slot
+  for (int ord = 0; ord < leaves; ++ord) {
+    const uint64_t h = leaf_hash[ord];
+    const uint64_t slotval =
+        ((h >> (64 - disc_bits)) << ord_bits) | (static_cast<uint64_t>(ord) + 1);
+    uint64_t idx = h & (num_slots - 1);
+    while (table[idx] != 0) idx = (idx + 1) & (num_slots - 1);
+    table[idx] = slotval;
+  }
+  const bool flat = (N == leaves + 1);        // only the root is a non-leaf
+
+  Writer w;
+  PutIntDense(w, 1, table);                   // hash_table (dense BITSET, UINT slots)
+  w.Field(2, T_I8); w.I8(static_cast<int8_t>(disc_bits));
+  w.Field(3, T_I8); w.I8(static_cast<int8_t>(ord_bits));
+  std::vector<uint64_t> eoff(N);
+  for (int i = 0; i < N; ++i) eoff[i] = static_cast<uint64_t>(elements_base + sl.span_off[i]);
+  PutIntDense(w, 4, eoff);                    // element_offsets (relative to SchemaModule start)
+  if (!flat) {
+    std::vector<uint64_t> lei(leaves);
+    for (int c = 0; c < leaves; ++c) lei[c] = static_cast<uint64_t>(leaf_elem[c]);
+    PutIntDense(w, 5, lei);                   // leaf_element_indexes (omitted when flat)
+    std::vector<uint64_t> par(N);             // element -> parent element (root and its children -> 0)
+    for (int i = 0; i < N; ++i) par[i] = parent[i] > 0 ? static_cast<uint64_t>(parent[i]) : 0;
+    PutIntDense(w, 6, par);                   // parent_ordinals (omitted when flat)
+  }
+  w.Field(7, non_ascii ? T_TRUE : T_FALSE);   // has_non_ascii_names
+  w.Stop();
+
+  if (info) {
+    info->flat = flat;
+    info->slots = static_cast<int>(num_slots);
+    info->slot_bits = pfb::BitWidth(Max(table));
+    info->non_ascii = non_ascii;
+  }
+  return w.bytes();
+}
 
 }  // namespace
 
@@ -678,19 +803,21 @@ int main(int argc, char** argv) {
   std::vector<std::string> pos;
   bool emit_pi = false;
   bool emit_full_file = false;
+  bool emit_si = false;  // schema index: opt-in, off by default
   int trunc = 0;  // max min/max suffix bytes; 0 = no truncation
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--page-index" || a == "-p") emit_pi = true;
     else if (a == "--full-file") emit_full_file = true;
+    else if (a == "--schema-index" || a == "-s") emit_si = true;
     else if (a == "--truncate-minmax") trunc = 16;
     else if (a.rfind("--truncate-minmax=", 0) == 0) trunc = std::atoi(a.c_str() + 18);
     else pos.push_back(a);
   }
   if (pos.empty()) {
     std::fprintf(stderr,
-        "usage: %s [--page-index] [--full-file] [--truncate-minmax[=N]] "
-        "input.parquet [output.modular]\n",
+        "usage: %s [--page-index] [--full-file] [--schema-index] "
+        "[--truncate-minmax[=N]] input.parquet [output.modular]\n",
         argv[0]);
     return 2;
   }
@@ -769,6 +896,18 @@ int main(int argc, char** argv) {
     else schema.AppendRaw("\x0c", 1);        // empty list<struct>
     schema.Stop();
 
+    // ---- schema index (optional, --schema-index): name -> leaf-ordinal hash plus
+    // per-element offsets into the schema module. Field(1, T_LIST) above is one byte,
+    // so the first schema element sits at offset 1 within the SchemaModule blob.
+    std::string schema_index;
+    bool have_schema_index = false;
+    SchemaIndexInfo si_info;
+    if (emit_si && fm.schema_span) {
+      SchemaLayout sl = ParseSchemaLayout(fm.schema_span, fm.schema_len);
+      schema_index = BuildSchemaIndex(sl, /*elements_base=*/1, &si_info);
+      have_schema_index = !schema_index.empty();
+    }
+
     // ---- file metadata: created_by + key_value_metadata (verbatim list).
     Writer filemeta;
     bool have_filemeta = false;
@@ -794,6 +933,8 @@ int main(int argc, char** argv) {
       return off;
     };
     dir.push_back({K_SCHEMA, place(schema.bytes()), static_cast<int64_t>(schema.bytes().size())});
+    if (have_schema_index)  // near the schema: a name-resolving reader fetches both
+      dir.push_back({K_SCHEMA_INDEX, place(schema_index), static_cast<int64_t>(schema_index.size())});
     dir.push_back({K_PLACEMENT, place(placement.bytes()), static_cast<int64_t>(placement.bytes().size())});
     if (have_filemeta)
       dir.push_back({K_FILE_METADATA, place(filemeta.bytes()), static_cast<int64_t>(filemeta.bytes().size())});
@@ -914,6 +1055,7 @@ int main(int argc, char** argv) {
         case K_OFFSET_INDEX: return "offset_index";
         case K_COLUMN_INDEX: return "column_index";
         case K_FILE_METADATA: return "file_metadata";
+        case K_SCHEMA_INDEX: return "schema_index";
         default: return "?";
       }
     };
@@ -928,6 +1070,11 @@ int main(int argc, char** argv) {
     for (const DirEntry& e : dir)
       std::printf("  %-16s off=%lld len=%lld\n", kind_name(e.kind),
                   static_cast<long long>(e.off), static_cast<long long>(e.len));
+    if (have_schema_index)
+      std::printf("  schema_index      %d slots x %d bits (0.7 load, 8 disc bits), "
+                  "leaf_element_indexes %s, non_ascii %s\n",
+                  si_info.slots, si_info.slot_bits, si_info.flat ? "omitted (flat)" : "present",
+                  si_info.non_ascii ? "true" : "false");
     const uint64_t output_bytes = static_cast<uint64_t>(modular_start) + out.size() +
                                   static_cast<uint64_t>(trailer_size);
     std::printf("output_mode           %s\n", emit_full_file ? "full_file" : "metadata_only");

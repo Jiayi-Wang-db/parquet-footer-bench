@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="560" viewBox="0 0 900 560">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>text{font-family:system-ui,-apple-system,sans-serif;fill:#172033}.title{font-size:20px;font-weight:700}.sub{font-size:13px;fill:#526071}.ax{font-size:12px;fill:#526071}.leg{font-size:13px;font-weight:600}</style>
+<text class="title" x="90" y="30">Name resolution: 1 column of a wide modular footer</text>
+<text class="sub" x="90" y="50">us/op (log-log) — resolve query column names to ordinals</text>
+<line x1="90" y1="490.0" x2="640" y2="490.0" stroke="#e5e9f0"/>
+<text class="ax" x="82" y="494.0" text-anchor="end">0.01 us</text>
+<line x1="90" y1="420.0" x2="640" y2="420.0" stroke="#e5e9f0"/>
+<text class="ax" x="82" y="424.0" text-anchor="end">0.1 us</text>
+<line x1="90" y1="350.0" x2="640" y2="350.0" stroke="#e5e9f0"/>
+<text class="ax" x="82" y="354.0" text-anchor="end">1 us</text>
+<line x1="90" y1="280.0" x2="640" y2="280.0" stroke="#e5e9f0"/>
+<text class="ax" x="82" y="284.0" text-anchor="end">10 us</text>
+<line x1="90" y1="210.0" x2="640" y2="210.0" stroke="#e5e9f0"/>
+<text class="ax" x="82" y="214.0" text-anchor="end">100 us</text>
+<line x1="90" y1="140.0" x2="640" y2="140.0" stroke="#e5e9f0"/>
+<text class="ax" x="82" y="144.0" text-anchor="end">1 ms</text>
+<line x1="90" y1="70.0" x2="640" y2="70.0" stroke="#e5e9f0"/>
+<text class="ax" x="82" y="74.0" text-anchor="end">10 ms</text>
+<line x1="90.0" y1="70" x2="90.0" y2="490" stroke="#eef1f6"/>
+<text class="ax" x="90.0" y="510" text-anchor="middle">500</text>
+<line x1="193.3" y1="70" x2="193.3" y2="490" stroke="#eef1f6"/>
+<text class="ax" x="193.3" y="510" text-anchor="middle">1000</text>
+<line x1="296.7" y1="70" x2="296.7" y2="490" stroke="#eef1f6"/>
+<text class="ax" x="296.7" y="510" text-anchor="middle">2000</text>
+<line x1="433.3" y1="70" x2="433.3" y2="490" stroke="#eef1f6"/>
+<text class="ax" x="433.3" y="510" text-anchor="middle">5000</text>
+<line x1="536.7" y1="70" x2="536.7" y2="490" stroke="#eef1f6"/>
+<text class="ax" x="536.7" y="510" text-anchor="middle">10000</text>
+<line x1="640.0" y1="70" x2="640.0" y2="490" stroke="#eef1f6"/>
+<text class="ax" x="640.0" y="510" text-anchor="middle">20000</text>
+<text class="ax" x="365.0" y="536" text-anchor="middle">schema columns (resolving 1 name)</text>
+<line x1="90" y1="70" x2="90" y2="490" stroke="#94a3b8"/>
+<line x1="90" y1="490" x2="640" y2="490" stroke="#94a3b8"/>
+<polyline points="90.0,235.2 193.3,213.5 296.7,192.9 433.3,165.0 536.7,142.8 640.0,119.3" fill="none" stroke="#64748b" stroke-width="2.5"/>
+<circle cx="90.0" cy="235.2" r="3.2" fill="#64748b"/>
+<circle cx="193.3" cy="213.5" r="3.2" fill="#64748b"/>
+<circle cx="296.7" cy="192.9" r="3.2" fill="#64748b"/>
+<circle cx="433.3" cy="165.0" r="3.2" fill="#64748b"/>
+<circle cx="536.7" cy="142.8" r="3.2" fill="#64748b"/>
+<circle cx="640.0" cy="119.3" r="3.2" fill="#64748b"/>
+<polyline points="90.0,422.5 193.3,422.5 296.7,422.5 433.3,422.9 536.7,408.9 640.0,412.5" fill="none" stroke="#9333ea" stroke-width="2.5"/>
+<circle cx="90.0" cy="422.5" r="3.2" fill="#9333ea"/>
+<circle cx="193.3" cy="422.5" r="3.2" fill="#9333ea"/>
+<circle cx="296.7" cy="422.5" r="3.2" fill="#9333ea"/>
+<circle cx="433.3" cy="422.9" r="3.2" fill="#9333ea"/>
+<circle cx="536.7" cy="408.9" r="3.2" fill="#9333ea"/>
+<circle cx="640.0" cy="412.5" r="3.2" fill="#9333ea"/>
+<text class="ax" x="670" y="66">resolve  (us/op @ 500 / 20000)</text>
+<line x1="670" y1="80.0" x2="696" y2="80.0" stroke="#64748b" stroke-width="3"/>
+<circle cx="683" cy="80.0" r="3.2" fill="#64748b"/>
+<text class="leg" x="704" y="84.0" fill="#64748b">walk schema (no hash)</text>
+<text class="ax" x="704" y="100.0">43.61 → 1976.23 us</text>
+<line x1="670" y1="126.0" x2="696" y2="126.0" stroke="#9333ea" stroke-width="3"/>
+<circle cx="683" cy="126.0" r="3.2" fill="#9333ea"/>
+<text class="leg" x="704" y="130.0" fill="#9333ea">persisted name hash</text>
+<text class="ax" x="704" y="146.0">0.09 → 0.13 us</text>
+</svg>

@@ -114,6 +114,54 @@ a 1-column projection down to ~1x at full projection.
 On a **narrow** footer (e.g. yellow_tripdata, 19 cols x 3 rg) all the lean readers
 are within a few microseconds — fixed overhead dominates, so narrow footers are
 not where footer decoding matters.
+
+## Name resolution: does a persisted schema hash earn its place?
+
+Resolving query column *names* to ordinals is the step *before* placement/stats
+resolution, and it has the same shape. `name_resolve_bench` times it two ways on a
+footer that carries a persisted name hash — either a jump-table footer
+(`SchemaLayout.NameHashTable`) or a modular footer with the optional `SCHEMA_INDEX`
+module (`parquet_to_modular --schema-index`); the format is auto-detected:
+
+- **`walk`** — no persisted hash: parse the whole schema (every `SchemaElement`) to
+  build name → ordinal, then look up the K queried names. O(all columns).
+- **`hash`** — persisted table: FNV-1a-64 probe per queried name, confirming the
+  candidate by reconstructing its full dotted path from the schema (per-element
+  offsets, plus the parent chain for nested schemas). O(projected).
+
+Both return identical ordinals (cross-checked before timing). `make_wide_footer`
+synthesizes flat footers of N named columns to reach the wide-schema regime the real
+corpus never hits.
+
+```sh
+cmake --build build -j --target make_wide_footer modular_footer_convert name_resolve_bench
+./build/make_wide_footer --columns 5000 --row-groups 4 wide.parquet
+./build/modular_footer_convert --schema-index wide.parquet wide.si.modular
+./build/name_resolve_bench wide.si.modular --sweep | \
+  python3 footer-decode-bench/plot_name_resolve.py "queried names (of 5000)" "Name resolution" > sweep.svg
+```
+
+Width sweep (resolve 1 name; walk grows O(columns), hash stays flat):
+
+| columns | walk | hash | speedup |
+|--------:|------:|------:|--------:|
+| 500 | 44 us | 0.09 us | ~475x |
+| 5,000 | 439 us | 0.09 us | ~4,800x |
+| 20,000 | 1,976 us | 0.13 us | ~15,000x |
+
+The projection sweep (`results/name_resolve_wide5000_ksweep.svg`) shows the walk flat
+across K (it always parses the whole schema) and the hash rising with K, crossing over
+only near full projection — so the persisted hash wins decisively exactly in the common
+case, a selective projection of a wide schema. The `SCHEMA_INDEX` module that backs the
+`hash` path costs ~3% of a (lean) footer at 5,000 columns and is written only on demand;
+see `../modular-footer/`. `modular_schema_index_check` is a reference reader that
+verifies every leaf resolves correctly (flat and nested schemas).
+
+| Sweep | SVG |
+|---|---|
+| Width (1 name of N) | [SVG](results/name_resolve_width_sweep.svg) |
+| Projection (K of 5000) | [SVG](results/name_resolve_wide5000_ksweep.svg) |
+
 ## Real corpus sweeps
 
 `run_corpus.py` converts and sweeps all four files from `real-footer-size/corpus.json`, then writes

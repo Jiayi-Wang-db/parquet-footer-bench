@@ -243,6 +243,67 @@ struct FileMetadataModule {
   2: optional list<parquet.KeyValue> key_value_metadata
 }
 
+/**
+ * Optional index over the schema. Turns name -> leaf-column-ordinal resolution, and per-element
+ * schema access, from O(all columns) into O(projected): a reader hashes each queried path instead
+ * of parsing every SchemaElement. Written only when the schema is wide enough to earn the bytes (a
+ * writer threshold); narrow footers omit it. Because it is located through the module directory, a
+ * reader that does not understand SCHEMA_INDEX -- or a footer that omits it -- simply walks
+ * SchemaModule, so this module is purely additive and never required for correctness.
+ *
+ * Resolution is O(projected) but not schema-free: confirming a hash hit reads the candidate leaf's
+ * bytes from SchemaModule via element_offsets, so a hash collision can never mis-resolve. A reader
+ * that projects K names parses K SchemaElements, not all of them. It rides its own module rather
+ * than optional fields on SchemaModule so the hash table -- the dominant cost -- stays off the
+ * always-read schema fetch.
+ */
+struct SchemaIndexModule {
+  /**
+   * Open-addressed hash table mapping a column path to its leaf-column ordinal. One dense UINT slot
+   * per table position: num_values == num_slots, a fully packed BITSET with no bitmap, and num_slots
+   * is a power of two. A zero slot is empty. A non-empty slot packs
+   * (discriminator << ordinal_bits) | (leaf_ordinal + 1), where discriminator is the top
+   * discriminator_bits of the key hash. The key is FNV-1a-64 over the leaf path lowercased (ASCII
+   * case-fold), segments joined by a single NUL byte, the root element excluded. The home slot is
+   * hash & (num_slots - 1); probing is linear, ascending, and wraps.
+   */
+  1: required ArrayPage hash_table,
+  /** Count of the high key-hash bits held in the discriminator field of each slot. */
+  2: required i8 discriminator_bits,
+  /**
+   * Count of the low slot bits holding leaf_ordinal + 1. discriminator_bits + ordinal_bits is the
+   * hash_table value bit width.
+   */
+  3: required i8 ordinal_bits,
+  /**
+   * UINT64: one dense byte offset per SchemaElement, in schema tree (DFS) order, relative to the
+   * start of SchemaModule's serialized bytes. Lets a reader seek to one element -- a projected leaf
+   * and its ancestors -- without parsing the elements before it.
+   */
+  4: required ArrayPage element_offsets,
+  /**
+   * UINT32: one dense entry per leaf column mapping its ordinal to an index into element_offsets.
+   * Absent when the schema is flat, in which case leaf ordinal c is element c + 1 (the root is
+   * element 0). Bridges a hash hit to the leaf's SchemaElement.
+   */
+  5: optional ArrayPage leaf_element_indexes,
+  /**
+   * UINT32: one dense entry per SchemaElement giving the element index of its parent, with the root
+   * (element 0) and every direct child of the root storing 0. A reader confirms a hash hit by
+   * walking this chain up from the candidate leaf -- reading each ancestor's name through
+   * element_offsets and stopping at the first element whose parent is 0 (the root is excluded from
+   * the path) -- so it reconstructs the full dotted path in O(depth) and a collision on a shared
+   * leaf name never mis-resolves. Absent when the schema is flat: every parent is 0 (a leaf path is
+   * just its own name), so this array carries no information.
+   */
+  6: optional ArrayPage parent_ordinals,
+  /**
+   * True when any indexed path holds a non-ASCII byte, so a reader knows the hash key was built with
+   * plain ASCII case-folding rather than a locale fold and matches the writer's convention.
+   */
+  7: required bool has_non_ascii_names
+}
+
 /** Kinds of module the directory can locate. Older readers skip kinds they do not understand. */
 enum ModuleKind {
   SCHEMA = 0,
@@ -250,7 +311,8 @@ enum ModuleKind {
   ROW_GROUP_STATISTICS = 2,
   OFFSET_INDEX = 3,
   COLUMN_INDEX = 4,
-  FILE_METADATA = 5
+  FILE_METADATA = 5,
+  SCHEMA_INDEX = 6
 }
 
 /** One directory entry: the location of the module of the given kind. */

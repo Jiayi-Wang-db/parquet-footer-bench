@@ -42,6 +42,16 @@ target_include_directories(modular_footer_convert PRIVATE include)
 add_executable(jumptable_footer_convert jumptable-footer/parquet_to_jumptable.cc)
 add_executable(footer_decode_bench footer-decode-bench/footer_decode_bench.cc)
 
+# Name-resolution benchmark (walk the schema vs a persisted name hash) and the wide
+# synthetic-footer generator that feeds it. The bench reads a jump-table footer or a
+# modular footer carrying a SCHEMA_INDEX module.
+add_executable(name_resolve_bench footer-decode-bench/name_resolve_bench.cc)
+add_executable(make_wide_footer footer-decode-bench/make_wide_footer.cc)
+
+# Reference reader + correctness check for the modular SCHEMA_INDEX module.
+add_executable(modular_schema_index_check modular-footer/schema_index_check.cc)
+target_include_directories(modular_schema_index_check PRIVATE include)
+
 enable_testing()
 add_executable(pfb_fidelity_test test/fidelity_test.cc)
 target_link_libraries(pfb_fidelity_test PRIVATE pfb_layouts)
