@@ -31,6 +31,7 @@
 #ifndef PFB_FOOTER_FORMATS_H_
 #define PFB_FOOTER_FORMATS_H_
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -411,6 +412,10 @@ class ModularResolver : public Resolver {
       else pr.Skip(f.type);
     }
     col_off_.assign(C + 1, 0);
+    // Reusable per-column stat buffers, sized once (no per-column allocation).
+    s_has_null_.assign(G, 0); s_null_count_.assign(G, 0); s_has_mm_.assign(G, 0);
+    s_pref_.assign(G, Span{}); s_minsuf_.assign(G, Span{}); s_maxsuf_.assign(G, Span{});
+    s_hp_.assign(G, 0); s_hms_.assign(G, 0); s_hxs_.assign(G, 0);
     if (stats_off >= 0) {
       have_stats_ = true;
       Reader sr(mod.data() + stats_off, mod.size() - static_cast<size_t>(stats_off));
@@ -427,19 +432,18 @@ class ModularResolver : public Resolver {
     Placement out;
     for (int c = 0; c < C; ++c) {
       if (!want[c]) continue;
-      ColStats cs;
-      if (have_stats_) cs = DecodeColumnStatistics(col_off_[c], col_off_[c + 1] - col_off_[c]);
+      if (have_stats_) DecodeColumnStatistics(col_off_[c], col_off_[c + 1] - col_off_[c]);
       for (int g = 0; g < G; ++g) {
         size_t cc = static_cast<size_t>(c) * G + g;
         Loc L;
         L.off = BitsetAt(dpo_, cc);
         L.size = BitsetAt(tcs_, cc);
         if (have_stats_) {
-          L.has_null = cs.has_null[g]; L.null_count = cs.null_count[g];
-          if (cs.has_mm[g]) {
+          L.has_null = s_has_null_[g]; L.null_count = s_null_count_[g];
+          if (s_has_mm_[g]) {
             L.has_mm = true;
-            L.min_a = cs.pref[g]; L.min_b = cs.minsuf[g];  // min = prefix ++ min_suffix
-            L.max_a = cs.pref[g]; L.max_b = cs.maxsuf[g];  // max = prefix ++ max_suffix
+            L.min_a = s_pref_[g]; L.min_b = s_minsuf_[g];  // min = prefix ++ min_suffix
+            L.max_a = s_pref_[g]; L.max_b = s_maxsuf_[g];  // max = prefix ++ max_suffix
           }
         }
         out.push_back(L);
@@ -449,35 +453,36 @@ class ModularResolver : public Resolver {
   }
 
  private:
-  struct ColStats {
-    std::vector<char> has_null; std::vector<int64_t> null_count;
-    std::vector<char> has_mm;
-    std::vector<Span> pref, minsuf, maxsuf;  // spans into mod_
-  };
-  ColStats DecodeColumnStatistics(int64_t off, int64_t len) const {
-    ColStats cs;
-    cs.has_null.assign(G, 0); cs.null_count.assign(G, 0);
-    cs.has_mm.assign(G, 0);
-    cs.pref.assign(G, Span{}); cs.minsuf.assign(G, Span{}); cs.maxsuf.assign(G, Span{});
-    if (len <= 0) return cs;
-    std::vector<char> hp(G, 0), hms(G, 0), hxs(G, 0);
+  // Fill the reusable per-column buffers from one ColumnStatistics module. No
+  // allocation per column -- only the present-flags need resetting (the value
+  // buffers are gated by them). Spans point into mod_, so emitted Locs stay valid
+  // regardless of the next column's decode.
+  void DecodeColumnStatistics(int64_t off, int64_t len) const {
+    std::fill(s_has_null_.begin(), s_has_null_.end(), 0);
+    std::fill(s_has_mm_.begin(), s_has_mm_.end(), 0);
+    std::fill(s_hp_.begin(), s_hp_.end(), 0);
+    std::fill(s_hms_.begin(), s_hms_.end(), 0);
+    std::fill(s_hxs_.begin(), s_hxs_.end(), 0);
+    if (len <= 0) return;
     Reader r(mod_.data() + off, static_cast<size_t>(len));
     for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
       if (f.type != T_STRUCT) { r.Skip(f.type); continue; }
-      if (f.id == CS_NULL_COUNTS) { ArrayPage ap = ParseArrayPage(r); PresentInt(ap, G, cs.has_null, cs.null_count); }
-      else if (f.id == CS_MINMAX_PREFIXES) { ArrayPage ap = ParseArrayPage(r); PresentBytes(ap, G, hp, cs.pref); }
-      else if (f.id == CS_MIN_SUFFIXES) { ArrayPage ap = ParseArrayPage(r); PresentBytes(ap, G, hms, cs.minsuf); }
-      else if (f.id == CS_MAX_SUFFIXES) { ArrayPage ap = ParseArrayPage(r); PresentBytes(ap, G, hxs, cs.maxsuf); }
+      if (f.id == CS_NULL_COUNTS) { ArrayPage ap = ParseArrayPage(r); PresentInt(ap, G, s_has_null_, s_null_count_); }
+      else if (f.id == CS_MINMAX_PREFIXES) { ArrayPage ap = ParseArrayPage(r); PresentBytes(ap, G, s_hp_, s_pref_); }
+      else if (f.id == CS_MIN_SUFFIXES) { ArrayPage ap = ParseArrayPage(r); PresentBytes(ap, G, s_hms_, s_minsuf_); }
+      else if (f.id == CS_MAX_SUFFIXES) { ArrayPage ap = ParseArrayPage(r); PresentBytes(ap, G, s_hxs_, s_maxsuf_); }
       else r.Skip(f.type);
     }
-    for (int g = 0; g < G; ++g) cs.has_mm[g] = hp[g] && hms[g] && hxs[g];
-    return cs;
+    for (int g = 0; g < G; ++g) s_has_mm_[g] = s_hp_[g] && s_hms_[g] && s_hxs_[g];
   }
 
   const std::string& mod_;
   ArrayPage dpo_, tcs_;
   std::vector<int64_t> col_off_;
   bool have_stats_ = false;
+  mutable std::vector<char> s_has_null_, s_has_mm_, s_hp_, s_hms_, s_hxs_;
+  mutable std::vector<int64_t> s_null_count_;
+  mutable std::vector<Span> s_pref_, s_minsuf_, s_maxsuf_;
 };
 
 }  // namespace fdb
