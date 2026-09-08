@@ -26,7 +26,8 @@
 // (CMakeLists.txt target modular_footer_convert) and any C++17 compiler.
 //
 //   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-//   ./build/modular_footer_convert [--page-index] input.parquet [output.modular]
+//   ./build/modular_footer_convert [--page-index] [--full-file]
+//       input.parquet [output.modular]
 //
 // Translates every module the FileMetaData footer carries:
 //   * schema             (copied verbatim -- read in full anyway)
@@ -47,7 +48,19 @@
 // the max suffix rounded up (still a valid upper bound), clearing the exactness
 // bit when truncated. Applies to row-group statistics and, with --page-index,
 // the column index.
+//
+// With --full-file the output remains a self-contained data file: everything
+// before the original Thrift footer is copied verbatim, followed by the modular
+// footer and a 20-byte trailer:
+//
+//   [unchanged PAR1 header and data pages][modular footer]
+//   [modular_start: LE i64][root_offset: LE i64][MFP1]
+//
+// root_offset is relative to modular_start, just like module offsets in the
+// root directory. Without --full-file, the existing metadata-only MFT1 format
+// is retained.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -664,17 +677,20 @@ struct DirEntry { int32_t kind; int64_t off; int64_t len; };
 int main(int argc, char** argv) {
   std::vector<std::string> pos;
   bool emit_pi = false;
+  bool emit_full_file = false;
   int trunc = 0;  // max min/max suffix bytes; 0 = no truncation
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--page-index" || a == "-p") emit_pi = true;
+    else if (a == "--full-file") emit_full_file = true;
     else if (a == "--truncate-minmax") trunc = 16;
     else if (a.rfind("--truncate-minmax=", 0) == 0) trunc = std::atoi(a.c_str() + 18);
     else pos.push_back(a);
   }
   if (pos.empty()) {
     std::fprintf(stderr,
-        "usage: %s [--page-index] [--truncate-minmax[=N]] input.parquet [output.modular]\n",
+        "usage: %s [--page-index] [--full-file] [--truncate-minmax[=N]] "
+        "input.parquet [output.modular]\n",
         argv[0]);
     return 2;
   }
@@ -689,6 +705,8 @@ int main(int argc, char** argv) {
     char head[4] = {0};
     in.seekg(0); in.read(head, 4);
     const bool full_file = std::memcmp(head, "PAR1", 4) == 0;  // else a bare tail
+    if (emit_full_file && !full_file)
+      throw std::runtime_error("--full-file requires a complete Parquet input");
     char tail[8];
     in.seekg(fsize - 8); in.read(tail, 8);
     if (std::memcmp(tail + 4, "PAR1", 4) != 0)
@@ -851,15 +869,41 @@ int main(int argc, char** argv) {
 
     std::ofstream out_file(out_path, std::ios::binary | std::ios::trunc);
     if (!out_file) throw std::runtime_error("cannot open " + out_path + " for writing");
+    if (emit_full_file) {
+      in.clear();
+      in.seekg(0);
+      constexpr size_t kCopyBufferBytes = 1024 * 1024;
+      std::vector<char> copy_buffer(kCopyBufferBytes);
+      int64_t remaining = footer_start;
+      while (remaining > 0) {
+        const size_t count = static_cast<size_t>(
+            std::min<int64_t>(remaining, static_cast<int64_t>(copy_buffer.size())));
+        in.read(copy_buffer.data(), static_cast<std::streamsize>(count));
+        if (in.gcount() != static_cast<std::streamsize>(count))
+          throw std::runtime_error("short read while copying Parquet data prefix");
+        out_file.write(copy_buffer.data(), static_cast<std::streamsize>(count));
+        remaining -= static_cast<int64_t>(count);
+      }
+    }
+    const int64_t modular_start = emit_full_file ? footer_start : 0;
     out_file.write(out.data(), out.size());
     // Navigability trailer: the root directory is written last, so record its
-    // absolute offset (LE i64) plus a magic. Additive -- the module layout and the
-    // reported modular_total_bytes are unchanged; it just lets a reader find the root.
-    char trailer[12];
+    // offset within the modular blob (LE i64) plus a magic. Full-file output also
+    // records where that blob begins. The module layout and modular_total_bytes
+    // are unchanged.
+    char trailer[20];
+    const int trailer_size = emit_full_file ? 20 : 12;
+    const int root_position = emit_full_file ? 8 : 0;
+    if (emit_full_file) {
+      for (int b = 0; b < 8; ++b)
+        trailer[b] = static_cast<char>(
+            (static_cast<uint64_t>(modular_start) >> (8 * b)) & 0xFF);
+    }
     for (int b = 0; b < 8; ++b)
-      trailer[b] = static_cast<char>((static_cast<uint64_t>(root_off) >> (8 * b)) & 0xFF);
-    std::memcpy(trailer + 8, "MFT1", 4);
-    out_file.write(trailer, 12);
+      trailer[root_position + b] = static_cast<char>(
+          (static_cast<uint64_t>(root_off) >> (8 * b)) & 0xFF);
+    std::memcpy(trailer + root_position + 8, emit_full_file ? "MFP1" : "MFT1", 4);
+    out_file.write(trailer, trailer_size);
     out_file.close();
 
     auto kind_name = [](int32_t k) -> const char* {
@@ -884,7 +928,13 @@ int main(int argc, char** argv) {
     for (const DirEntry& e : dir)
       std::printf("  %-16s off=%lld len=%lld\n", kind_name(e.kind),
                   static_cast<long long>(e.off), static_cast<long long>(e.len));
-    std::printf("wrote                 %s (%zu bytes)\n", out_path.c_str(), out.size());
+    const uint64_t output_bytes = static_cast<uint64_t>(modular_start) + out.size() +
+                                  static_cast<uint64_t>(trailer_size);
+    std::printf("output_mode           %s\n", emit_full_file ? "full_file" : "metadata_only");
+    if (emit_full_file)
+      std::printf("unchanged_prefix      %lld bytes\n", static_cast<long long>(footer_start));
+    std::printf("wrote                 %s (%llu bytes)\n", out_path.c_str(),
+                static_cast<unsigned long long>(output_bytes));
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "error: %s\n", e.what());

@@ -32,6 +32,20 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j --target modular_footer_convert
 ```
 
+To produce a complete file that the experimental Hardwood reader can query, replace only the
+standard footer while preserving the original header, data pages, and page-index bytes:
+
+```sh
+./build/modular_footer_convert --full-file --truncate-minmax=16 \
+  real-footer-size/data/yellow-tripdata-2025-01.parquet \
+  real-footer-size/data/yellow-tripdata-2025-01.modular.parquet
+```
+
+Complete modular files end in
+`[modular_start: LE i64][root_offset: LE i64][MFP1]`. Both the root offset and module offsets are
+relative to `modular_start`. Without `--full-file`, the converter continues to emit the existing
+metadata-only `MFT1` file.
+
 ![Normalized footer-size comparison](footer-size.svg)
 
 ![Footer component breakdown](footer-components.svg)
