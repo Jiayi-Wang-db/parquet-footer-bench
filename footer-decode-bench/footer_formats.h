@@ -116,14 +116,13 @@ enum { // PageFirstModularFooter
   PK_PAGE_DIRECTORY = 1,
   REGION_MAP_OFFSETS = 1,
   PAGE_DIRECTORY_REGIONS = 1,
-  COLUMN_PAGE_COUNT = 1,
-  COLUMN_PAGE_REGIONS = 2,
-  COLUMN_PAGE_FIRST_ROWS = 3,
-  COLUMN_FULLY_DICTIONARY = 4,
-  COLUMN_PAGE_CODECS = 5,
-  COLUMN_PAGE_DICTIONARIES = 6,
-  COLUMN_PAGE_NUM_VALUES = 7,
-  COLUMN_PAGE_UNCOMPRESSED_SIZES = 8,
+  COLUMN_PAGE_REGIONS = 1,
+  COLUMN_PAGE_FIRST_ROWS = 2,
+  COLUMN_FULLY_DICTIONARY = 3,
+  COLUMN_PAGE_CODECS = 4,
+  COLUMN_PAGE_DICTIONARIES = 5,
+  COLUMN_PAGE_NUM_VALUES = 6,
+  COLUMN_PAGE_UNCOMPRESSED_SIZES = 7,
   PAGE_ARRAY_BITSET = 0,
   PAGE_ARRAY_DELTA_BINARY_PACKED = 2,
   COLUMN_ARRAY_BITPACKED = 0,
@@ -487,7 +486,7 @@ inline ArrayPage DbpArray(Span values) {
   return array;
 }
 
-inline ArrayPage ParseColumnArray(Reader &r, int num_values) {
+inline ArrayPage ParseColumnArray(Reader &r) {
   Span payload;
   int16_t state = r.StructBegin();
   for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
@@ -501,14 +500,32 @@ inline ArrayPage ParseColumnArray(Reader &r, int num_values) {
     throw std::runtime_error("column array payload is too short");
   ArrayPage array;
   uint8_t encoding = static_cast<uint8_t>(payload.data[0]);
-  array.values = {payload.data + 1, payload.size - 1};
-  array.num_values = num_values;
-  if (encoding == COLUMN_ARRAY_BITPACKED)
+  if (encoding == COLUMN_ARRAY_BITPACKED) {
+    const uint8_t *cursor = reinterpret_cast<const uint8_t *>(payload.data) + 1;
+    const uint8_t *end =
+        reinterpret_cast<const uint8_t *>(payload.data) + payload.size;
+    uint64_t count = 0;
+    int shift = 0;
+    while (cursor != end && shift < 64) {
+      uint8_t byte = *cursor++;
+      count |= static_cast<uint64_t>(byte & 0x7f) << shift;
+      if (!(byte & 0x80))
+        break;
+      shift += 7;
+    }
+    if (cursor == end || shift >= 64 || count > std::numeric_limits<int>::max())
+      throw std::runtime_error("invalid bit-packed column array count");
+    array.values = {reinterpret_cast<const char *>(cursor),
+                    static_cast<uint32_t>(end - cursor)};
+    array.num_values = static_cast<int>(count);
     array.encoding = PAGE_ARRAY_BITSET;
-  else if (encoding == COLUMN_ARRAY_DELTA_BINARY_PACKED)
+  } else if (encoding == COLUMN_ARRAY_DELTA_BINARY_PACKED) {
+    array.values = {payload.data + 1, payload.size - 1};
+    array.num_values = DbpValueCount(array.values);
     array.encoding = PAGE_ARRAY_DELTA_BINARY_PACKED;
-  else
+  } else {
     throw std::runtime_error("unsupported column array encoding");
+  }
   return array;
 }
 
@@ -770,36 +787,34 @@ public:
       if (!want[c])
         continue;
       Span page_region = Region(page_regions_[c], *offsets);
-      int page_count = -1;
       ArrayPage encoded_page_regions, encoded_first_rows, dictionary_regions,
           page_codecs, page_num_values, page_uncompressed_sizes;
       int fully_dictionary_encoded = -1;
       Reader pages(page_region.data, page_region.size);
       for (Reader::Field f = pages.NextField(); f.type != T_STOP;
            f = pages.NextField()) {
-        if (f.id == COLUMN_PAGE_COUNT && f.type == T_I32)
-          page_count = pages.I32();
-        else if (f.id == COLUMN_PAGE_REGIONS && f.type == T_STRUCT)
-          encoded_page_regions = ParseColumnArray(pages, page_count);
+        if (f.id == COLUMN_PAGE_REGIONS && f.type == T_STRUCT)
+          encoded_page_regions = ParseColumnArray(pages);
         else if (f.id == COLUMN_PAGE_FIRST_ROWS && f.type == T_STRUCT)
-          encoded_first_rows = ParseColumnArray(pages, page_count);
+          encoded_first_rows = ParseColumnArray(pages);
         else if (f.id == COLUMN_FULLY_DICTIONARY &&
                  (f.type == T_TRUE || f.type == T_FALSE))
           fully_dictionary_encoded = f.type == T_TRUE;
         else if (f.id == COLUMN_PAGE_CODECS && f.type == T_STRUCT)
-          page_codecs = ParseColumnArray(pages, page_count);
+          page_codecs = ParseColumnArray(pages);
         else if (f.id == COLUMN_PAGE_DICTIONARIES && f.type == T_STRUCT)
-          dictionary_regions = ParseColumnArray(pages, page_count);
+          dictionary_regions = ParseColumnArray(pages);
         else if (f.id == COLUMN_PAGE_NUM_VALUES && f.type == T_STRUCT)
-          page_num_values = ParseColumnArray(pages, page_count);
+          page_num_values = ParseColumnArray(pages);
         else if (f.id == COLUMN_PAGE_UNCOMPRESSED_SIZES && f.type == T_STRUCT)
-          page_uncompressed_sizes = ParseColumnArray(pages, page_count);
+          page_uncompressed_sizes = ParseColumnArray(pages);
         else
           pages.Skip(f.type);
       }
-      if (page_count < 0 || fully_dictionary_encoded < 0)
+      if (fully_dictionary_encoded < 0)
         throw std::runtime_error(
             "column data pages are missing required fields");
+      int page_count = encoded_page_regions.num_values;
       for (ArrayPage *array :
            {&encoded_page_regions, &encoded_first_rows, &page_codecs,
             &dictionary_regions, &page_num_values, &page_uncompressed_sizes}) {

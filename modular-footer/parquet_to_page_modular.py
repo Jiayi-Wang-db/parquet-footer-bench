@@ -122,7 +122,7 @@ def delta_values(values):
 
 
 def adaptive_values(values):
-    bitpacked = bytes([PAGE_ARRAY_BITPACKED]) + dense_values(values)
+    bitpacked = bytes([PAGE_ARRAY_BITPACKED]) + uleb(len(values)) + dense_values(values)
     delta = bytes([PAGE_ARRAY_DELTA_BINARY_PACKED]) + delta_values(values)
     return min((bitpacked, delta), key=len)
 
@@ -659,17 +659,16 @@ def build_statistics_descriptor(column_chunks, range_start_rows, suffix_limit):
         max_exact.append(int(stats["max_exact"] and max_was_exact))
     domain = len(range_start_rows)
     fields = [
-        [1, compact.I32, domain],
-        encoded_field(2, adaptive_array(range_start_rows)),
+        encoded_field(1, adaptive_array(range_start_rows)),
     ]
     if len(null_positions) == domain:
-        fields.append([3, compact.LIST, (compact.I64, null_values)])
+        fields.append(encoded_field(2, adaptive_array(null_values)))
     if len(nan_positions) == domain:
-        fields.append([4, compact.LIST, (compact.I64, nan_values)])
+        fields.append(encoded_field(3, adaptive_array(nan_values)))
     if minmax_positions:
         if len(minmax_positions) != domain:
             fields.append([
-                5, compact.BINARY, presence_bitmap(domain, minmax_positions),
+                4, compact.BINARY, presence_bitmap(domain, minmax_positions),
             ])
         prefix_lengths = [len(prefix) for prefix in prefixes]
         suffix_lengths = []
@@ -681,15 +680,15 @@ def build_statistics_descriptor(column_chunks, range_start_rows, suffix_limit):
             suffixes.extend(minimum)
             suffixes.extend(maximum)
         fields.extend([
-            [6, compact.LIST, (compact.I32, prefix_lengths)],
-            [7, compact.BINARY, bytes(prefix_bytes)],
-            [8, compact.LIST, (compact.I32, suffix_lengths)],
-            [9, compact.BINARY, bytes(suffixes)],
+            encoded_field(5, adaptive_array(prefix_lengths)),
+            [6, compact.BINARY, bytes(prefix_bytes)],
+            encoded_field(7, adaptive_array(suffix_lengths)),
+            [8, compact.BINARY, bytes(suffixes)],
         ])
         if not all(min_exact) or not all(max_exact):
             exactness = [value for pair in zip(min_exact, max_exact) for value in pair]
             fields.append([
-                10, compact.BINARY, pack_bits(exactness, 1),
+                9, compact.BINARY, pack_bits(exactness, 1),
             ])
     return compact.encode(fields)
 
@@ -831,27 +830,26 @@ def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
 
         column_page_values = column_pages[column]
         page_blob = compact.encode([
-            [1, compact.I32, len(column_page_values)],
-            encoded_field(2, adaptive_array([
+            encoded_field(1, adaptive_array([
                 page.region for page in column_page_values
             ])),
-            encoded_field(3, adaptive_array([
+            encoded_field(2, adaptive_array([
                 page.first_row for page in column_page_values
             ])),
-            [4, compact.BOOL_TRUE, bool(column_page_values) and all(
+            [3, compact.BOOL_TRUE, bool(column_page_values) and all(
                 page.dictionary_region is not None for page in column_page_values
             )],
-            encoded_field(5, adaptive_array([
+            encoded_field(4, adaptive_array([
                 page.codec for page in column_page_values
             ])),
-            encoded_field(6, adaptive_array([
+            encoded_field(5, adaptive_array([
                 0 if page.dictionary_region is None else page.dictionary_region + 1
                 for page in column_page_values
             ])),
-            encoded_field(7, adaptive_array([
+            encoded_field(6, adaptive_array([
                 page.num_values for page in column_page_values
             ])),
-            encoded_field(8, adaptive_array([
+            encoded_field(7, adaptive_array([
                 page.total_uncompressed_size for page in column_page_values
             ])),
         ])

@@ -22,9 +22,9 @@ struct RegionMap {
 
 /**
  * A compact sequential integer array. Byte zero is the encoding: zero for fixed-width bit-packing,
- * one for Parquet DELTA_BINARY_PACKED. A bit-packed payload continues with its bit width byte and
- * LSB-first values. A DBP payload continues with the standard DBP stream. The containing structure
- * supplies the expected value count.
+ * one for Parquet DELTA_BINARY_PACKED. A bit-packed payload continues with a ULEB128 value count,
+ * its bit width byte, and LSB-first values. A DBP payload continues with the standard DBP stream,
+ * which already contains its value count.
  */
 struct EncodedArray {
   1: required binary values
@@ -32,22 +32,20 @@ struct EncodedArray {
 
 /** Every per-page array is decoded for the whole selected column. */
 struct ColumnDataPages {
-  /** Number of aligned data-page positions. Zero means the complete column is null. */
-  1: required i32 num_data_pages,
   /** UINT64 region ordinals containing each complete PageHeader and body. */
-  2: required EncodedArray region_ordinals,
+  1: required EncodedArray region_ordinals,
   /** UINT64 absolute, zero-based top-level first rows. */
-  3: required EncodedArray first_row_indexes,
-  /** True when every data page references a dictionary page; false when num_data_pages is zero. */
-  4: required bool is_fully_dictionary_encoded,
+  2: required EncodedArray first_row_indexes,
+  /** True when every data page references a dictionary page; false when there are no data pages. */
+  3: required bool is_fully_dictionary_encoded,
   /** CompressionCodec values. */
-  5: required EncodedArray codecs,
+  4: required EncodedArray codecs,
   /** UINT64 dictionary region + 1; zero when unused. The dictionary uses this codec. */
-  6: required EncodedArray dictionary_regions,
+  5: required EncodedArray dictionary_regions,
   /** UINT64 page value counts. */
-  7: required EncodedArray num_values,
+  6: required EncodedArray num_values,
   /** UINT64 uncompressed bytes including PageHeader and body. */
-  8: required EncodedArray total_uncompressed_sizes
+  7: required EncodedArray total_uncompressed_sizes
 }
 
 /** One region ordinal per leaf column, pointing to its independently serialized ColumnDataPages. */
@@ -61,32 +59,31 @@ struct PageDirectory {
  * or file num_rows for the final block. All arrays are sequential within this selected column.
  */
 struct RowRangeStatistics {
-  1: required i32 num_ranges,
   /** Absolute top-level starting rows; starts at zero and is strictly increasing. */
-  2: required EncodedArray range_start_rows,
-  /** Exactly num_ranges values when present. */
-  3: optional list<i64> null_counts,
-  /** Exactly num_ranges values when present. */
-  4: optional list<i64> nan_counts,
+  1: required EncodedArray range_start_rows,
+  /** Exactly one value per range when present. */
+  2: optional EncodedArray null_counts,
+  /** Exactly one value per range when present. */
+  3: optional EncodedArray nan_counts,
   /** LSB-first bit per range; omitted when every range has min/max. */
-  5: optional binary min_max_presence,
+  4: optional binary min_max_presence,
   /** One prefix byte length per present min/max pair; absence means no min/max statistics. */
-  6: optional list<i32> min_max_prefix_lengths,
+  5: optional EncodedArray min_max_prefix_lengths,
   /** Concatenated prefixes in present-range order. */
-  7: optional binary min_max_prefixes,
+  6: optional binary min_max_prefixes,
   /** Interleaved [min length, max length] for each present min/max pair. */
-  8: optional list<i32> min_max_suffix_lengths,
+  7: optional EncodedArray min_max_suffix_lengths,
   /** Concatenated [min suffix, max suffix] bytes in present-range order. */
-  9: optional binary min_max_suffixes,
+  8: optional binary min_max_suffixes,
   /** Interleaved [min exact, max exact] bits; omitted when every published bound is exact. */
-  10: optional binary min_max_is_exact
+  9: optional binary min_max_is_exact
 }
 
 /** Compact descriptors for the leaf columns that publish statistics. */
 struct RowRangeStatisticsDirectory {
-  /** LSB-first bit per leaf column; omitted when every column participates. */
-  1: optional binary participating_columns,
-  /** [u8 bit_width][one packed region ordinal per participating column, in column order]. */
+  /** LSB-first bit per leaf column; omitted when every column is present. */
+  1: optional binary present_columns,
+  /** [u8 bit_width][one packed region ordinal per present column, in column order]. */
   2: required binary column_statistics_regions
 }
 

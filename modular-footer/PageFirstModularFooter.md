@@ -87,8 +87,8 @@ Readers can therefore load page metadata in proportion to projection rather than
 column's logical page arrays. Its locator field is a fixed-width bit-packed binary with one region
 ordinal per leaf column, supporting direct access by column ordinal.
 
-Each column descriptor contains one shared data-page count, one dictionary-encoding summary, and
-six encoded arrays:
+Each column descriptor contains one dictionary-encoding summary and six self-describing encoded
+arrays:
 
 ```text
 is_fully_dictionary_encoded
@@ -109,18 +109,18 @@ remain available in its `PageHeader`.
 
 Each array independently uses the smaller of fixed-width bit-packing and Parquet
 `DELTA_BINARY_PACKED`. Its single binary starts with an encoding byte. A bit-packed payload then
-stores its bit width and LSB-first values; a DBP payload contains the standard DBP stream. The
-selected column is decoded sequentially. There is no RLE, sparse presence, default value, domain
-table, or other coalescing. Value count and uncompressed size remain physically repeated once per
-data page. Physical region ordinals need not be monotonic.
+stores a ULEB128 value count, its bit width, and LSB-first values; a DBP payload contains the
+standard self-counting DBP stream. The selected column is decoded sequentially. There is no RLE,
+sparse presence, default value, domain table, or other coalescing. Value count and uncompressed
+size remain physically repeated once per data page. Physical region ordinals need not be monotonic.
 
 `is_fully_dictionary_encoded` summarizes the complete column rather than each column chunk. Exact
 per-page encodings remain in page headers; direct dictionary-region references identify the pages
 that use a dictionary. Physical type remains in the schema. Total compressed bytes are derived from
 region boundaries; value and uncompressed-byte totals are derived from the per-page arrays.
 
-A schema-present column with `num_data_pages == 0` represents an all-null column over the root's
-`num_rows`; it is not a missing column. Its packed arrays are empty and
+A schema-present column whose page arrays contain zero values represents an all-null column over
+the root's `num_rows`; it is not a missing column. Its packed arrays are empty and
 `is_fully_dictionary_encoded` is false. This convention permits writers to omit physical pages for
 flat all-null columns. A nested or repeated leaf may be omitted only when its repetition and
 definition structure can be reconstructed without that leaf's pages; otherwise it still requires
@@ -134,16 +134,16 @@ The current row-group statistics module is replaced by independently selected pe
 statistics. Ranges use the same absolute top-level row coordinate as page metadata. Statistics
 boundaries do not close pages or dictionaries.
 
-Each participating leaf column has one independently addressable descriptor. The statistics
-directory has an optional LSB-first participation bitmap and a compact fixed-width packed array of
-descriptor region ordinals in column order. The bitmap is omitted when every column participates.
+Each present leaf column has one independently addressable descriptor. The statistics directory
+has an optional LSB-first presence bitmap and a compact fixed-width packed array of descriptor
+region ordinals in column order. The bitmap is omitted when every column is present.
 A reader can test membership directly and obtain a compact-array index using popcount over the
 preceding bitmap bits. It may materialize the complete column-to-region lookup once rather than
 store rank checkpoints on disk. A column without statistics has no descriptor entry.
 
-A participating column must cover every row in the file with a dense partition of statistics
-blocks. Its descriptor stores only absolute `range_start_rows`, beginning with zero and strictly
-increasing. Block `i` ends at start `i + 1`; the final block ends at the root's `num_rows`.
+A present column must cover every row in the file with a dense partition of statistics blocks. Its
+descriptor stores only absolute `range_start_rows`, beginning with zero and strictly increasing.
+Block `i` ends at start `i + 1`; the final block ends at the root's `num_rows`.
 
 For example, a 10,000-row column partitioned at rows 1,000, 3,000, and 5,000 stores:
 
@@ -153,12 +153,13 @@ range_start_rows = [0, 1000, 3000, 5000]
 
 This describes `[0, 1000)`, `[1000, 3000)`, `[3000, 5000)`, and `[5000, 10000)`.
 `range_start_rows` uses the local adaptive `EncodedArray`, so locating a column descriptor is O(1)
-but decoding ranges within that column is sequential. Null and NaN counts are optional
-Compact-Thrift lists containing one value per range when present. Min/max shares one presence bit
-per range. Prefix lengths and bytes are stored separately, as are interleaved min/max suffix lengths
-and concatenated suffix bytes. Exactness is an interleaved min/max bitset and is omitted when every
-published bound is exact. Every block must publish at least one statistic. Each column chooses its
-own dense partition, without a shared granularity, preamble, or row-group identity.
+but decoding ranges within that column is sequential. Null and NaN counts are optional adaptive
+arrays containing one value per range when present. Min/max shares one presence bit per range.
+Prefix lengths and interleaved min/max suffix lengths are adaptive arrays; prefix and suffix bytes
+are stored in separate concatenated binaries. Exactness is an interleaved min/max bitset and is
+omitted when every published bound is exact. Every block must publish at least one statistic. Each
+column chooses its own dense partition, without a shared granularity, preamble, or row-group
+identity.
 
 There is no separate page-level `ColumnIndex` module. A writer that wants page-granular pruning
 publishes row-range blocks that tile its pages. Placement maps matching row ranges to pages using
@@ -220,17 +221,17 @@ the same file to the page-first modules above.
 
 | Dataset | Column chunks (count) | Data pages (count) | Dictionary pages (count) | Total pages (count) | Current footer (bytes) | Current footer + offset indexes (bytes) | Column-chunk placement (bytes) | Page placement (bytes) | Placement change | Complete column-chunk footer (bytes) | Complete page footer (bytes) | Complete change |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| US Accidents | 50,830 | 50,830 | 36,465 | 87,295 | 4,747,144 | 5,872,211 | 694,618 | 277,907 | −60.0% | 1,764,414 | 1,057,922 | −40.0% |
-| FineWeb 10BT | 9,441 | 9,441 | 9,441 | 18,882 | 3,971,883 | 4,187,395 | 158,380 | 63,668 | −59.8% | 530,722 | 371,512 | −30.0% |
-| Hacker News | 15,022 | 15,022 | 12,876 | 27,898 | 1,840,138 | 2,177,310 | 223,029 | 115,175 | −48.4% | 598,045 | 406,755 | −32.0% |
-| Yellow Taxi | 80 | 145 | 80 | 225 | 11,212 | 13,868 | 1,404 | 3,211 | +128.7% | 5,877 | 7,297 | +24.2% |
+| US Accidents | 50,830 | 50,830 | 36,465 | 87,295 | 4,747,144 | 5,872,211 | 694,618 | 277,795 | −60.0% | 1,764,414 | 892,344 | −49.4% |
+| FineWeb 10BT | 9,441 | 9,441 | 9,441 | 18,882 | 3,971,883 | 4,187,395 | 158,380 | 63,643 | −59.8% | 530,722 | 337,076 | −36.5% |
+| Hacker News | 15,022 | 15,022 | 12,876 | 27,898 | 1,840,138 | 2,177,310 | 223,029 | 115,141 | −48.4% | 598,045 | 356,204 | −40.4% |
+| Yellow Taxi | 80 | 145 | 80 | 225 | 11,212 | 13,868 | 1,404 | 3,289 | +134.3% | 5,877 | 7,461 | +27.0% |
 
 | Dataset | Current modular row-group statistics (bytes) | Page-first row-range statistics (bytes) | Change |
 | --- | ---: | ---: | ---: |
-| US Accidents | 1,059,755 | 769,859 | −27.4% |
-| FineWeb 10BT | 371,353 | 306,847 | −17.4% |
-| Hacker News | 371,678 | 288,219 | −22.5% |
-| Yellow Taxi | 2,265 | 1,835 | −19.0% |
+| US Accidents | 1,059,755 | 604,393 | −43.0% |
+| FineWeb 10BT | 371,353 | 272,436 | −26.6% |
+| Hacker News | 371,678 | 237,702 | −36.0% |
+| Yellow Taxi | 2,265 | 1,921 | −15.2% |
 
 `Current footer + offset indexes` includes the serialized index blobs and the growth of the Thrift
 footer from adding each chunk's index offset and length. The index blobs alone are 718,427 bytes,
@@ -248,19 +249,17 @@ modular-footer comparison.
 The three large files have exactly one data page per column chunk. A Thrift offset index adds 211
 KiB to 1.07 MiB after locator growth. Adaptive per-page streams make page placement 48% to 60%
 smaller than column-chunk placement on the three large files. Yellow Taxi has only a few pages per
-column; selecting bit-packing cuts its placement increase from 418% to 129%. Dense Thrift count
-lists and split prefix/suffix framing make page-first statistics 17% to 27% smaller than current
-modular on these files.
+column; selecting bit-packing cuts its placement increase from 418% to 134%. Adaptive count and
+length arrays plus split prefix/suffix framing make page-first statistics 15% to 43% smaller than
+current modular on these files.
 
 These measurements use the legacy physical layout. Each of the six per-column arrays emits the
 smaller of its bit-packed and strict DBP forms. There are no runs, defaults, or shared dictionaries
 outside the values represented by those streams.
 
-## Previous fixed-width decode results
+## Placement decode results
 
-These timings predate the adaptive `ColumnDataPages` representation and have not been regenerated.
-They apply to the preceding fixed-width per-page arrays. The C++ footer-decode harness has a
-fidelity-checked page-first resolver. `Page cold` decodes the
+The C++ footer-decode harness has a fidelity-checked page-first resolver. `Page cold` decodes the
 mandatory DBP region offsets on each operation; `Page warm` retains the absolute offsets and
 measures projected column descriptors. Inputs are already in
 memory; each case runs for roughly 200 ms. Absolute timings are specific to an Intel Xeon 6975P.
@@ -269,10 +268,10 @@ At a one-column projection, the placement-only Raincloud workload is:
 
 | Dataset | Current Thrift (µs/op) | Current modular (µs/op) | Page cold (µs/op) | Page warm (µs/op) |
 | --- | ---: | ---: | ---: | ---: |
-| US Accidents | 78,051.480 | 27.024 | 129.727 | 25.973 |
-| FineWeb 10BT | 11,702.438 | 26.302 | 38.121 | 23.934 |
-| Hacker News | 21,828.798 | 26.860 | 56.582 | 24.423 |
-| Yellow Taxi | 101.753 | 0.129 | 0.459 | 0.179 |
+| US Accidents | 77,139.652 | 28.500 | 115.041 | 11.633 |
+| FineWeb 10BT | 11,711.905 | 26.519 | 25.176 | 11.408 |
+| Hacker News | 18,720.695 | 27.143 | 43.727 | 11.223 |
+| Yellow Taxi | 101.450 | 0.128 | 0.514 | 0.220 |
 
 Statistics are intentionally excluded from the page-first timing comparison. The row-range layout
 above is included in footer-size accounting, but its decode workload has not been implemented or
@@ -280,8 +279,8 @@ measured.
 
 `Current Thrift` fully materializes the current Thrift footer into an object tree. `Page cold`
 includes the mandatory DBP region-offset decode; `Page warm` retains the resulting offsets. In the
-placement-only workload, retained-map page-first takes 0.91-0.96x current modular time on the three
-large files and 1.39x on Yellow Taxi. These results do not include I/O, page-header decoding,
+placement-only workload, retained-map page-first takes 0.41-0.43x current modular time on the three
+large files and 1.72x on Yellow Taxi. These results do not include I/O, page-header decoding,
 codec-stream decoding, or statistics. `Current Thrift + OffsetIndex` is a size comparison, not a
 separate resolver here: the index is stored outside the footer and this workload still requires
 parsing current Thrift metadata.

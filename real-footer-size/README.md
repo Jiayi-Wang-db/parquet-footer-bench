@@ -91,8 +91,8 @@ The [design notes](../modular-footer/PageFirstModularFooter.md) and
 column-chunk placement with two layers:
 an always-read array of absolute region offsets and independently addressed logical page
 descriptors for each column. Every complete serialized page is exactly one region. Region offsets
-use strict Parquet `DELTA_BINARY_PACKED`. Each column descriptor stores one data-page count, one
-whole-column dictionary-encoding boolean, and six arrays that independently choose the smaller of
+use strict Parquet `DELTA_BINARY_PACKED`. Each column descriptor stores one whole-column
+dictionary-encoding boolean and six self-counting arrays that independently choose the smaller of
 fixed-width bit-packing and DBP. Exact encodings remain in page headers. Dictionary pages remain
 physical regions and are reached through direct data-page references; they do not occupy logical
 descriptor rows. Dictionary references are not coalesced. A schema-present column with zero data
@@ -133,24 +133,24 @@ The machine-readable output is in `page-footer-size.csv`.
 
 | dataset | chunks (count) | data pages (count) | dictionary pages (count) | total pages (count) | current footer (bytes) | current + offset indexes (bytes) | column-chunk placement (bytes) | page placement (bytes) | placement change | complete column-chunk footer (bytes) | complete page footer (bytes) | complete change |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| US Accidents | 50,830 | 50,830 | 36,465 | 87,295 | 4,747,144 | 5,872,211 | 694,618 | 277,907 | −60.0% | 1,764,414 | 1,057,922 | −40.0% |
-| FineWeb 10BT | 9,441 | 9,441 | 9,441 | 18,882 | 3,971,883 | 4,187,395 | 158,380 | 63,668 | −59.8% | 530,722 | 371,512 | −30.0% |
-| Hacker News | 15,022 | 15,022 | 12,876 | 27,898 | 1,840,138 | 2,177,310 | 223,029 | 115,175 | −48.4% | 598,045 | 406,755 | −32.0% |
-| Yellow Taxi | 80 | 145 | 80 | 225 | 11,212 | 13,868 | 1,404 | 3,211 | +128.7% | 5,877 | 7,297 | +24.2% |
+| US Accidents | 50,830 | 50,830 | 36,465 | 87,295 | 4,747,144 | 5,872,211 | 694,618 | 277,795 | −60.0% | 1,764,414 | 892,344 | −49.4% |
+| FineWeb 10BT | 9,441 | 9,441 | 9,441 | 18,882 | 3,971,883 | 4,187,395 | 158,380 | 63,643 | −59.8% | 530,722 | 337,076 | −36.5% |
+| Hacker News | 15,022 | 15,022 | 12,876 | 27,898 | 1,840,138 | 2,177,310 | 223,029 | 115,141 | −48.4% | 598,045 | 356,204 | −40.4% |
+| Yellow Taxi | 80 | 145 | 80 | 225 | 11,212 | 13,868 | 1,404 | 3,289 | +134.3% | 5,877 | 7,461 | +27.0% |
 
 Row-range statistics account for the following bytes, including the per-column locator array:
 
 | dataset | current modular row-group statistics (bytes) | page-first row-range statistics (bytes) | change |
 |---|---:|---:|---:|
-| US Accidents | 1,059,755 | 769,859 | −27.4% |
-| FineWeb 10BT | 371,353 | 306,847 | −17.4% |
-| Hacker News | 371,678 | 288,219 | −22.5% |
-| Yellow Taxi | 2,265 | 1,835 | −19.0% |
+| US Accidents | 1,059,755 | 604,393 | −43.0% |
+| FineWeb 10BT | 371,353 | 272,436 | −26.6% |
+| Hacker News | 371,678 | 237,702 | −36.0% |
+| Yellow Taxi | 2,265 | 1,921 | −15.2% |
 
 Column-chunk placement is the current modular proposal's serialized `placement` module alone; its
 complete footer includes all modules emitted by Jiayi's converter. Page placement comprises the
-DBP region map, bit-packed page directory, one dictionary-encoding boolean, and six per-column
-arrays that independently choose bit-packing or DBP, sharing one data-page count per column.
+DBP region map, bit-packed page directory, one dictionary-encoding boolean, and six self-counting
+per-column arrays that independently choose bit-packing or DBP.
 Dictionary pages still have region
 boundaries, but are represented logically only by direct references from data pages.
 Physical types remain in the shared schema and `num_rows` remains in the shared root, so neither
@@ -159,9 +159,9 @@ schema, converted row-range statistics, file metadata, and the root. Current + o
 includes both serialized Thrift `OffsetIndex` blobs and the footer growth from adding their
 per-chunk locators.
 
-On the three large files, complete page-first footers are 30% to 40% smaller than current modular.
+On the three large files, complete page-first footers are 37% to 49% smaller than current modular.
 Yellow Taxi has only a few pages per column; choosing bit-packing for short arrays cuts its
-page-placement overhead substantially, although its complete page-first footer remains 24% larger.
+page-placement overhead substantially, although its complete page-first footer remains 27% larger.
 
 Both prefix-based representations cap each min/max suffix at the configured limit (16 bytes in the
 table), so their statistics policies are directly comparable.

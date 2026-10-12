@@ -39,8 +39,8 @@ numbers reflect decode work, not the allocator.
 | `walk` | today's nested footer: visit every column chunk, decode the projected ones. | O(all chunks) |
 | `index` | jump table: seek straight to each projected chunk. | O(projected) |
 | `modular` | `ModularFooter`: column-major bit-packed placement + a separate `ColumnStatistics` module. | O(projected) |
-| `page_cold` | page-first footer: decode the mandatory DBP region offsets, then decode projected columns' DBP page arrays. | O(all regions + projected pages) |
-| `page_warm` | page-first footer with the region map retained; projected columns' DBP page arrays are decoded sequentially. | O(projected pages) |
+| `page_cold` | page-first footer: decode the mandatory DBP region offsets, then decode projected columns' adaptive page arrays. | O(all regions + projected pages) |
+| `page_warm` | page-first footer with the region map retained; projected columns' adaptive page arrays are decoded sequentially. | O(projected pages) |
 
 Files: `footer_decode_bench.cc` (driver), `footer_formats.h` (the six resolvers),
 `plot_sweep.py`, `run_corpus.py`. Placement-only runs cross-check every resolver against the current
@@ -73,15 +73,12 @@ cmake --build build -j --target dbp_throughput
 build/dbp_throughput input.page-modular
 ```
 
-Across the five measured maps, median throughput over three runs is 1.57-1.77 billion offsets/s,
-equivalent to 12.5-14.2 GB/s of decoded `int64_t` output. Encoded-input throughput is 2.58-4.38 GB/s
+Across the five measured maps, median throughput over three runs is 1.61-1.65 billion offsets/s,
+equivalent to 12.9-13.2 GB/s of decoded `int64_t` output. Encoded-input throughput is 2.40-4.39 GB/s
 because the maps have different packed bit widths. See
 `results/dbp-region-map-throughput.csv`.
 
-### Previous fixed-width page-first result
-
-The decode results in this section predate the current adaptive `ColumnDataPages` representation and
-have not been regenerated. They apply to the preceding fixed-width per-page arrays.
+### Adaptive page-first result
 
 The proposal's shape is a flat table with 2,000 columns and 10 row groups. The page-first
 comparison uses a real Parquet fixture with that shape so the converter can scan actual pages. Each
@@ -90,12 +87,12 @@ fidelity-checked before timing. Results below are microseconds per operation on 
 
 | layout | project 1 (µs/op) | project all 2,000 (µs/op) |
 |---|---:|---:|
-| standard Thrift materialization | 30,053.092 | 30,682.719 |
-| footer walk | 2,003.583 | 1,981.928 |
-| jump table | 1.936 | 1,639.144 |
-| current modular | 1.499 | 571.409 |
-| page-first, cold map | 47.699 | 688.146 |
-| page-first, retained map | 1.525 | 641.414 |
+| standard Thrift materialization | 26,098.066 | 27,398.410 |
+| footer walk | 2,007.720 | 1,989.003 |
+| jump table | 2.084 | 1,830.445 |
+| current modular | 1.521 | 571.808 |
+| page-first, cold map | 47.889 | 783.746 |
+| page-first, retained map | 1.567 | 735.496 |
 
 This reproduces the proposal's projection scaling for the existing layouts. Page-first decode is
 essentially tied with current modular for one projected column after the map is retained. With the
@@ -135,10 +132,10 @@ One projected column on the Raincloud corpus, in microseconds per operation:
 
 | dataset | current Thrift (µs/op) | current modular (µs/op) | page cold (µs/op) | page retained (µs/op) |
 |---|---:|---:|---:|---:|
-| US Accidents | 78,051.480 | 27.024 | 129.727 | 25.973 |
-| FineWeb 10BT | 11,702.438 | 26.302 | 38.121 | 23.934 |
-| Hacker News | 21,828.798 | 26.860 | 56.582 | 24.423 |
-| Yellow Taxi | 101.753 | 0.129 | 0.459 | 0.179 |
+| US Accidents | 77,139.652 | 28.500 | 115.041 | 11.633 |
+| FineWeb 10BT | 11,711.905 | 26.519 | 25.176 | 11.408 |
+| Hacker News | 18,720.695 | 27.143 | 43.727 | 11.223 |
+| Yellow Taxi | 101.450 | 0.128 | 0.514 | 0.220 |
 
 Statistics are intentionally excluded to isolate placement decode. `page cold` decodes every DBP
 region offset; `page retained` reuses the resulting absolute offsets.
