@@ -91,13 +91,12 @@ The [design notes](../modular-footer/PageFirstModularFooter.md) and
 column-chunk placement with two layers:
 an always-read array of absolute region offsets and independently addressed logical page
 descriptors for each column. Every complete serialized page is exactly one region. Region offsets
-use strict Parquet `DELTA_BINARY_PACKED`. Each column
-descriptor stores one data-page count, one whole-column dictionary-encoding boolean, five packed
-fixed-width random-access binaries, and one Parquet `DELTA_BINARY_PACKED` codec stream. A constant
-codec stream uses one block and one miniblock covering the complete column. Exact encodings remain
-in page headers. Dictionary pages remain physical regions and are reached through direct data-page
-references; they do not occupy logical descriptor rows. Codecs use DBP; dictionary references are
-not coalesced. A schema-present column with zero data pages represents an all-null column.
+use strict Parquet `DELTA_BINARY_PACKED`. Each column descriptor stores one data-page count, one
+whole-column dictionary-encoding boolean, and six arrays that independently choose the smaller of
+fixed-width bit-packing and DBP. Exact encodings remain in page headers. Dictionary pages remain
+physical regions and are reached through direct data-page references; they do not occupy logical
+descriptor rows. Dictionary references are not coalesced. A schema-present column with zero data
+pages represents an all-null column.
 
 The converter scans actual `PageHeader` values because the legacy footer does not contain a page
 inventory. DataPageV2 carries its top-level row count directly. For nested DataPageV1 input, the
@@ -118,11 +117,11 @@ The comparison script reports:
    locator fields;
 3. the current modular proposal's column-chunk `placement` module;
 4. the complete current modular footer;
-5. page-first placement, comprising the DBP region map, fixed-width per-page arrays, and DBP
-   codecs;
+5. page-first placement, comprising the DBP region map, bit-packed column directory, and adaptive
+   bit-packed/DBP per-page arrays;
    and
 6. the complete page-first modular footer with schema, page metadata, converted row-range
-   statistics with DBP start rows, file metadata, and root.
+   statistics with adaptive start rows and stats-local sparsity, file metadata, and root.
 
 `--full-file` preserves the original data prefix and replaces the PAR1 footer with the experimental
 metadata and a `[region map location][root location][PMF1]` trailer. Without it, the converter emits
@@ -134,24 +133,25 @@ The machine-readable output is in `page-footer-size.csv`.
 
 | dataset | chunks (count) | data pages (count) | dictionary pages (count) | total pages (count) | current footer (bytes) | current + offset indexes (bytes) | column-chunk placement (bytes) | page placement (bytes) | placement change | complete column-chunk footer (bytes) | complete page footer (bytes) | complete change |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| US Accidents | 50,830 | 50,830 | 36,465 | 87,295 | 4,747,144 | 5,872,211 | 694,618 | 686,667 | −1.1% | 1,764,414 | 1,759,451 | −0.3% |
-| FineWeb 10BT | 9,441 | 9,441 | 9,441 | 18,882 | 3,971,883 | 4,187,395 | 158,380 | 133,976 | −15.4% | 530,722 | 509,561 | −4.0% |
-| Hacker News | 15,022 | 15,022 | 12,876 | 27,898 | 1,840,138 | 2,177,310 | 223,029 | 227,528 | +2.0% | 598,045 | 603,440 | +0.9% |
-| Yellow Taxi | 80 | 145 | 80 | 225 | 11,212 | 13,868 | 1,404 | 2,927 | +108.5% | 5,877 | 7,753 | +31.9% |
+| US Accidents | 50,830 | 50,830 | 36,465 | 87,295 | 4,747,144 | 5,872,211 | 694,618 | 277,907 | −60.0% | 1,764,414 | 1,057,922 | −40.0% |
+| FineWeb 10BT | 9,441 | 9,441 | 9,441 | 18,882 | 3,971,883 | 4,187,395 | 158,380 | 63,668 | −59.8% | 530,722 | 371,512 | −30.0% |
+| Hacker News | 15,022 | 15,022 | 12,876 | 27,898 | 1,840,138 | 2,177,310 | 223,029 | 115,175 | −48.4% | 598,045 | 406,755 | −32.0% |
+| Yellow Taxi | 80 | 145 | 80 | 225 | 11,212 | 13,868 | 1,404 | 3,211 | +128.7% | 5,877 | 7,297 | +24.2% |
 
 Row-range statistics account for the following bytes, including the per-column locator array:
 
 | dataset | current modular row-group statistics (bytes) | page-first row-range statistics (bytes) | change |
 |---|---:|---:|---:|
-| US Accidents | 1,059,755 | 1,062,628 | +0.3% |
-| FineWeb 10BT | 371,353 | 374,588 | +0.9% |
-| Hacker News | 371,678 | 372,551 | +0.2% |
-| Yellow Taxi | 2,265 | 2,575 | +13.7% |
+| US Accidents | 1,059,755 | 769,859 | −27.4% |
+| FineWeb 10BT | 371,353 | 306,847 | −17.4% |
+| Hacker News | 371,678 | 288,219 | −22.5% |
+| Yellow Taxi | 2,265 | 1,835 | −19.0% |
 
 Column-chunk placement is the current modular proposal's serialized `placement` module alone; its
 complete footer includes all modules emitted by Jiayi's converter. Page placement comprises the
-DBP region map, page directory, one dictionary-encoding boolean, five aligned fixed-width binaries,
-and one DBP codec stream sharing one data-page count per column. Dictionary pages still have region
+DBP region map, bit-packed page directory, one dictionary-encoding boolean, and six per-column
+arrays that independently choose bit-packing or DBP, sharing one data-page count per column.
+Dictionary pages still have region
 boundaries, but are represented logically only by direct references from data pages.
 Physical types remain in the shared schema and `num_rows` remains in the shared root, so neither
 whole structure is charged to page placement. The complete page footer additionally includes
@@ -159,9 +159,9 @@ schema, converted row-range statistics, file metadata, and the root. Current + o
 includes both serialized Thrift `OffsetIndex` blobs and the footer growth from adding their
 per-chunk locators.
 
-On the three large files, dense DBP range starts put page-first statistics within 1% of current
-modular statistics and complete page-first footers range from 4% smaller to 1% larger than current
-modular.
+On the three large files, complete page-first footers are 30% to 40% smaller than current modular.
+Yellow Taxi has only a few pages per column; choosing bit-packing for short arrays cuts its
+page-placement overhead substantially, although its complete page-first footer remains 24% larger.
 
 Both prefix-based representations cap each min/max suffix at the configured limit (16 bytes in the
 table), so their statistics policies are directly comparable.

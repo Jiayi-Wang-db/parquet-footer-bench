@@ -62,8 +62,8 @@ fdb::ArrayPage ReadRegionOffsets(const std::string &file) {
                      static_cast<size_t>(map_length));
   for (fdb::Reader::Field field = reader.NextField(); field.type != fdb::T_STOP;
        field = reader.NextField()) {
-    if (field.id == kLegacyRegionMapOffsets && field.type == fdb::T_STRUCT)
-      return fdb::ParseArrayPage(reader);
+    if (field.id == kLegacyRegionMapOffsets && field.type == fdb::T_BINARY)
+      return fdb::DbpArray(reader.BinarySpan());
     reader.Skip(field.type);
   }
   throw std::runtime_error("region map has no offsets");

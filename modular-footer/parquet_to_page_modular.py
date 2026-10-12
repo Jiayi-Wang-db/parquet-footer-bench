@@ -16,14 +16,13 @@ sys.path.insert(0, str(ROOT / "real-footer-size"))
 import compact  # noqa: E402
 
 
-ENC_BITSET = 0
-ENC_PRESENT_INDEX = 1
-ENC_DELTA_BINARY_PACKED = 2
+PAGE_ARRAY_BITPACKED = 0
+PAGE_ARRAY_DELTA_BINARY_PACKED = 1
 
 K_SCHEMA = 0
 K_PAGE_DIRECTORY = 1
-K_COLUMN_RANGE_STATISTICS = 4
-K_FILE_METADATA = 6
+K_ROW_RANGE_STATISTICS = 2
+K_FILE_METADATA = 3
 
 DATA_PAGE = 0
 DICTIONARY_PAGE = 2
@@ -85,6 +84,13 @@ def dense_values(values):
     return bytes([width]) + pack_bits(values, width)
 
 
+def presence_bitmap(domain, positions):
+    values = bytearray((domain + 7) // 8)
+    for position in positions:
+        values[position // 8] |= 1 << (position % 8)
+    return bytes(values)
+
+
 def delta_values(values):
     constant = not values or min(values) == max(values)
     delta_count = max(1, len(values) - 1)
@@ -115,61 +121,14 @@ def delta_values(values):
     return bytes(output)
 
 
-def delta_array(values):
-    return [
-        [1, compact.I32, len(values)],
-        [2, compact.BINARY, delta_values(values)],
-        [3, compact.I32, ENC_DELTA_BINARY_PACKED],
-    ]
+def adaptive_values(values):
+    bitpacked = bytes([PAGE_ARRAY_BITPACKED]) + dense_values(values)
+    delta = bytes([PAGE_ARRAY_DELTA_BINARY_PACKED]) + delta_values(values)
+    return min((bitpacked, delta), key=len)
 
 
-def dense_array(values):
-    return [
-        [1, compact.I32, len(values)],
-        [2, compact.BINARY, dense_values(values)],
-    ]
-
-
-def sparse_int_array(domain, positions, values):
-    value_width = bit_width(values)
-    value_payload = bytes([value_width]) + pack_bits(values, value_width)
-    position_width = bit_width(positions)
-    presence = (
-        uleb(len(positions))
-        + bytes([position_width])
-        + pack_bits(positions, position_width)
-    )
-    return [
-        [1, compact.I32, domain],
-        [2, compact.BINARY, value_payload],
-        [3, compact.I32, ENC_PRESENT_INDEX],
-        [4, compact.BINARY, presence],
-    ]
-
-
-def byte_values(values):
-    offsets = [0]
-    data = bytearray()
-    for value in values:
-        data.extend(value)
-        offsets.append(len(data))
-    width = bit_width(offsets)
-    return bytes([width]) + pack_bits(offsets, width) + bytes(data)
-
-
-def sparse_bytes_array(domain, positions, values):
-    position_width = bit_width(positions)
-    presence = (
-        uleb(len(positions))
-        + bytes([position_width])
-        + pack_bits(positions, position_width)
-    )
-    return [
-        [1, compact.I32, domain],
-        [2, compact.BINARY, byte_values(values)],
-        [3, compact.I32, ENC_PRESENT_INDEX],
-        [4, compact.BINARY, presence],
-    ]
+def adaptive_array(values):
+    return [[1, compact.BINARY, adaptive_values(values)]]
 
 
 def encoded_field(field_id, array):
@@ -360,18 +319,11 @@ def unpack_bits(data, width, count):
     return values
 
 
-def decode_delta_array(array):
-    count = required(array, 1, compact.I32, "RegionOffsetArray.num_values")
-    payload = required(array, 2, compact.BINARY, "RegionOffsetArray.values")
-    encoding = optional_int(array, 3, ENC_BITSET)
-    if encoding != ENC_DELTA_BINARY_PACKED:
-        raise ValueError("RegionOffsetArray is not delta binary packed")
+def decode_delta_values(payload):
     block_size, offset = read_uleb(payload, 0)
     mini_block_count, offset = read_uleb(payload, offset)
-    encoded_count, offset = read_uleb(payload, offset)
+    count, offset = read_uleb(payload, offset)
     first, offset = read_zigzag(payload, offset)
-    if encoded_count != count:
-        raise ValueError("DELTA_BINARY_PACKED value count disagrees with RegionOffsetArray")
     if block_size % 128 or not mini_block_count or block_size % mini_block_count:
         raise ValueError("invalid DELTA_BINARY_PACKED block shape")
     mini_block_size = block_size // mini_block_count
@@ -398,7 +350,7 @@ def decode_delta_array(array):
                 values.append(values[-1] + minimum + residual)
             remaining -= used
     if offset != len(payload):
-        raise ValueError("RegionOffsetArray has the wrong decoded length")
+        raise ValueError("DELTA_BINARY_PACKED stream has the wrong decoded length")
     return values
 
 
@@ -707,23 +659,38 @@ def build_statistics_descriptor(column_chunks, range_start_rows, suffix_limit):
         max_exact.append(int(stats["max_exact"] and max_was_exact))
     domain = len(range_start_rows)
     fields = [
-        [1, compact.BINARY, delta_values(range_start_rows)],
+        [1, compact.I32, domain],
+        encoded_field(2, adaptive_array(range_start_rows)),
     ]
-    if null_positions:
-        fields.append(encoded_field(3, sparse_int_array(domain, null_positions, null_values)))
+    if len(null_positions) == domain:
+        fields.append([3, compact.LIST, (compact.I64, null_values)])
+    if len(nan_positions) == domain:
+        fields.append([4, compact.LIST, (compact.I64, nan_values)])
     if minmax_positions:
+        if len(minmax_positions) != domain:
+            fields.append([
+                5, compact.BINARY, presence_bitmap(domain, minmax_positions),
+            ])
+        prefix_lengths = [len(prefix) for prefix in prefixes]
+        suffix_lengths = []
+        suffixes = bytearray()
+        prefix_bytes = bytearray()
+        for prefix, minimum, maximum in zip(prefixes, min_suffixes, max_suffixes):
+            prefix_bytes.extend(prefix)
+            suffix_lengths.extend([len(minimum), len(maximum)])
+            suffixes.extend(minimum)
+            suffixes.extend(maximum)
         fields.extend([
-            encoded_field(4, sparse_bytes_array(domain, minmax_positions, prefixes)),
-            encoded_field(5, sparse_bytes_array(domain, minmax_positions, min_suffixes)),
-            encoded_field(6, sparse_bytes_array(domain, minmax_positions, max_suffixes)),
+            [6, compact.LIST, (compact.I32, prefix_lengths)],
+            [7, compact.BINARY, bytes(prefix_bytes)],
+            [8, compact.LIST, (compact.I32, suffix_lengths)],
+            [9, compact.BINARY, bytes(suffixes)],
         ])
         if not all(min_exact) or not all(max_exact):
-            fields.extend([
-                encoded_field(7, sparse_int_array(domain, minmax_positions, min_exact)),
-                encoded_field(8, sparse_int_array(domain, minmax_positions, max_exact)),
+            exactness = [value for pair in zip(min_exact, max_exact) for value in pair]
+            fields.append([
+                10, compact.BINARY, pack_bits(exactness, 1),
             ])
-    if nan_positions:
-        fields.append(encoded_field(9, sparse_int_array(domain, nan_positions, nan_values)))
     return compact.encode(fields)
 
 
@@ -865,38 +832,34 @@ def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
         column_page_values = column_pages[column]
         page_blob = compact.encode([
             [1, compact.I32, len(column_page_values)],
-            [
-                2, compact.BINARY,
-                dense_values([page.region for page in column_page_values]),
-            ],
-            [
-                3, compact.BINARY,
-                dense_values([page.first_row for page in column_page_values]),
-            ],
+            encoded_field(2, adaptive_array([
+                page.region for page in column_page_values
+            ])),
+            encoded_field(3, adaptive_array([
+                page.first_row for page in column_page_values
+            ])),
             [4, compact.BOOL_TRUE, bool(column_page_values) and all(
                 page.dictionary_region is not None for page in column_page_values
             )],
-            [
-                5, compact.BINARY,
-                delta_values([page.codec for page in column_page_values]),
-            ],
-            [6, compact.BINARY, dense_values([
+            encoded_field(5, adaptive_array([
+                page.codec for page in column_page_values
+            ])),
+            encoded_field(6, adaptive_array([
                 0 if page.dictionary_region is None else page.dictionary_region + 1
                 for page in column_page_values
-            ])],
-            [
-                7, compact.BINARY,
-                dense_values([page.num_values for page in column_page_values]),
-            ],
-            [8, compact.BINARY, dense_values([
+            ])),
+            encoded_field(7, adaptive_array([
+                page.num_values for page in column_page_values
+            ])),
+            encoded_field(8, adaptive_array([
                 page.total_uncompressed_size for page in column_page_values
-            ])],
+            ])),
         ])
         page_regions.append(layout.add("pages_{}".format(column), page_blob))
         page_descriptor_bytes += len(page_blob)
 
     page_directory = compact.encode([
-        encoded_field(1, dense_array(page_regions)),
+        [1, compact.BINARY, dense_values(page_regions)],
     ])
     page_directory_region = layout.add("page_directory", page_directory)
     modules.append((K_PAGE_DIRECTORY, page_directory_region))
@@ -922,15 +885,18 @@ def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
             stats_values.append(region)
             stats_descriptor_bytes += len(descriptor)
     if stats_positions:
-        stats_directory = compact.encode([
-            encoded_field(
-                1,
-                sparse_int_array(num_columns, stats_positions, stats_values),
-            ),
+        stats_directory_fields = []
+        if len(stats_positions) != num_columns:
+            stats_directory_fields.append([
+                1, compact.BINARY, presence_bitmap(num_columns, stats_positions),
+            ])
+        stats_directory_fields.append([
+            2, compact.BINARY, dense_values(stats_values),
         ])
+        stats_directory = compact.encode(stats_directory_fields)
         stats_directory_bytes = len(stats_directory)
-        stats_directory_region = layout.add("column_range_statistics", stats_directory)
-        modules.append((K_COLUMN_RANGE_STATISTICS, stats_directory_region))
+        stats_directory_region = layout.add("row_range_statistics", stats_directory)
+        modules.append((K_ROW_RANGE_STATISTICS, stats_directory_region))
 
     file_metadata_blob = thrift_file_metadata_module(footer)
     if file_metadata_blob:
@@ -942,8 +908,9 @@ def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
     modules.append((K_SCHEMA, schema_region))
 
     region_map_offset = layout.cursor
+    encoded_region_offsets = delta_values(layout.offsets)
     region_map_blob = compact.encode([
-        [1, compact.STRUCT, delta_array(layout.offsets)],
+        [1, compact.BINARY, encoded_region_offsets],
     ])
     root_offset = region_map_offset + len(region_map_blob)
     root_blob = compact.encode([
@@ -962,8 +929,8 @@ def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
         )],
     ])
     decoded_region_map = compact.decode(region_map_blob)
-    decoded_offsets = decode_delta_array(
-        required(decoded_region_map, 1, compact.STRUCT, "RegionMap.region_offsets")
+    decoded_offsets = decode_delta_values(
+        required(decoded_region_map, 1, compact.BINARY, "RegionMap.region_offsets")
     )
     if decoded_offsets != layout.offsets:
         raise ValueError("RegionMap round-trip changed an offset")

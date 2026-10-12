@@ -126,6 +126,8 @@ enum { // PageFirstModularFooter
   COLUMN_PAGE_UNCOMPRESSED_SIZES = 8,
   PAGE_ARRAY_BITSET = 0,
   PAGE_ARRAY_DELTA_BINARY_PACKED = 2,
+  COLUMN_ARRAY_BITPACKED = 0,
+  COLUMN_ARRAY_DELTA_BINARY_PACKED = 1,
 };
 
 // The common interface. C x G = the chunk grid; a projection is a per-column mask.
@@ -424,6 +426,8 @@ inline uint64_t ExtractBitsBounded(const uint8_t *data, size_t size,
 
 // Decode the standard Parquet DELTA_BINARY_PACKED payload used by PageArray.
 inline std::vector<int64_t> DecodePageArray(const ArrayPage &ap) {
+  if (ap.num_values == 0)
+    return {};
   if (ap.encoding == PAGE_ARRAY_BITSET) {
     std::vector<int64_t> values(ap.num_values);
     int width = ap.values.size ? static_cast<uint8_t>(ap.values.data[0]) : 0;
@@ -450,6 +454,62 @@ inline std::vector<int64_t> DecodePageArray(const ArrayPage &ap) {
     throw std::runtime_error("runtime DBP decoder rejected PageArray");
   return values;
 #endif
+}
+
+inline int DbpValueCount(Span encoded) {
+  const uint8_t *cursor = reinterpret_cast<const uint8_t *>(encoded.data);
+  const uint8_t *end = cursor + encoded.size;
+  auto read_uleb = [&]() {
+    uint64_t value = 0;
+    for (int shift = 0; shift < 64; shift += 7) {
+      if (cursor == end)
+        throw std::runtime_error("truncated DBP header");
+      uint8_t byte = *cursor++;
+      value |= static_cast<uint64_t>(byte & 0x7f) << shift;
+      if (!(byte & 0x80))
+        return value;
+    }
+    throw std::runtime_error("invalid DBP header");
+  };
+  read_uleb();
+  read_uleb();
+  uint64_t count = read_uleb();
+  if (count > static_cast<uint64_t>(std::numeric_limits<int>::max()))
+    throw std::runtime_error("DBP value count is too large");
+  return static_cast<int>(count);
+}
+
+inline ArrayPage DbpArray(Span values) {
+  ArrayPage array;
+  array.values = values;
+  array.encoding = PAGE_ARRAY_DELTA_BINARY_PACKED;
+  array.num_values = DbpValueCount(values);
+  return array;
+}
+
+inline ArrayPage ParseColumnArray(Reader &r, int num_values) {
+  Span payload;
+  int16_t state = r.StructBegin();
+  for (Reader::Field f = r.NextField(); f.type != T_STOP; f = r.NextField()) {
+    if (f.id == 1 && f.type == T_BINARY)
+      payload = r.BinarySpan();
+    else
+      r.Skip(f.type);
+  }
+  r.StructEnd(state);
+  if (payload.size < 2)
+    throw std::runtime_error("column array payload is too short");
+  ArrayPage array;
+  uint8_t encoding = static_cast<uint8_t>(payload.data[0]);
+  array.values = {payload.data + 1, payload.size - 1};
+  array.num_values = num_values;
+  if (encoding == COLUMN_ARRAY_BITPACKED)
+    array.encoding = PAGE_ARRAY_BITSET;
+  else if (encoding == COLUMN_ARRAY_DELTA_BINARY_PACKED)
+    array.encoding = PAGE_ARRAY_DELTA_BINARY_PACKED;
+  else
+    throw std::runtime_error("unsupported column array encoding");
+  return array;
 }
 
 // value/offset width is the first byte of `values`; the packed stream follows it.
@@ -645,8 +705,8 @@ public:
                       static_cast<size_t>(map_length));
     for (Reader::Field f = map_reader.NextField(); f.type != T_STOP;
          f = map_reader.NextField()) {
-      if (f.id == REGION_MAP_OFFSETS && f.type == T_STRUCT)
-        encoded_region_offsets_ = ParseArrayPage(map_reader);
+      if (f.id == REGION_MAP_OFFSETS && f.type == T_BINARY)
+        encoded_region_offsets_ = DbpArray(map_reader.BinarySpan());
       else
         map_reader.Skip(f.type);
     }
@@ -712,44 +772,45 @@ public:
       Span page_region = Region(page_regions_[c], *offsets);
       int page_count = -1;
       ArrayPage encoded_page_regions, encoded_first_rows, dictionary_regions,
-          page_num_values, page_uncompressed_sizes;
-      Span encoded_page_codecs;
+          page_codecs, page_num_values, page_uncompressed_sizes;
       int fully_dictionary_encoded = -1;
       Reader pages(page_region.data, page_region.size);
       for (Reader::Field f = pages.NextField(); f.type != T_STOP;
            f = pages.NextField()) {
         if (f.id == COLUMN_PAGE_COUNT && f.type == T_I32)
           page_count = pages.I32();
-        else if (f.id == COLUMN_PAGE_REGIONS && f.type == T_BINARY)
-          encoded_page_regions.values = pages.BinarySpan();
-        else if (f.id == COLUMN_PAGE_FIRST_ROWS && f.type == T_BINARY)
-          encoded_first_rows.values = pages.BinarySpan();
+        else if (f.id == COLUMN_PAGE_REGIONS && f.type == T_STRUCT)
+          encoded_page_regions = ParseColumnArray(pages, page_count);
+        else if (f.id == COLUMN_PAGE_FIRST_ROWS && f.type == T_STRUCT)
+          encoded_first_rows = ParseColumnArray(pages, page_count);
         else if (f.id == COLUMN_FULLY_DICTIONARY &&
                  (f.type == T_TRUE || f.type == T_FALSE))
           fully_dictionary_encoded = f.type == T_TRUE;
-        else if (f.id == COLUMN_PAGE_CODECS && f.type == T_BINARY)
-          encoded_page_codecs = pages.BinarySpan();
-        else if (f.id == COLUMN_PAGE_DICTIONARIES && f.type == T_BINARY)
-          dictionary_regions.values = pages.BinarySpan();
-        else if (f.id == COLUMN_PAGE_NUM_VALUES && f.type == T_BINARY)
-          page_num_values.values = pages.BinarySpan();
-        else if (f.id == COLUMN_PAGE_UNCOMPRESSED_SIZES && f.type == T_BINARY)
-          page_uncompressed_sizes.values = pages.BinarySpan();
+        else if (f.id == COLUMN_PAGE_CODECS && f.type == T_STRUCT)
+          page_codecs = ParseColumnArray(pages, page_count);
+        else if (f.id == COLUMN_PAGE_DICTIONARIES && f.type == T_STRUCT)
+          dictionary_regions = ParseColumnArray(pages, page_count);
+        else if (f.id == COLUMN_PAGE_NUM_VALUES && f.type == T_STRUCT)
+          page_num_values = ParseColumnArray(pages, page_count);
+        else if (f.id == COLUMN_PAGE_UNCOMPRESSED_SIZES && f.type == T_STRUCT)
+          page_uncompressed_sizes = ParseColumnArray(pages, page_count);
         else
           pages.Skip(f.type);
       }
-      if (page_count < 0 || fully_dictionary_encoded < 0 ||
-          encoded_page_codecs.size == 0)
+      if (page_count < 0 || fully_dictionary_encoded < 0)
         throw std::runtime_error(
             "column data pages are missing required fields");
       for (ArrayPage *array :
-           {&encoded_page_regions, &encoded_first_rows, &dictionary_regions,
-            &page_num_values, &page_uncompressed_sizes}) {
-        if (array->values.size == 0)
+           {&encoded_page_regions, &encoded_first_rows, &page_codecs,
+            &dictionary_regions, &page_num_values, &page_uncompressed_sizes}) {
+        if (array->values.size == 0 || array->num_values != page_count)
           throw std::runtime_error(
-              "column data pages are missing a packed array");
-        array->num_values = page_count;
+              "column data pages have an invalid encoded array");
       }
+
+      std::vector<int64_t> page_regions = DecodePageArray(encoded_page_regions);
+      std::vector<int64_t> first_rows = DecodePageArray(encoded_first_rows);
+      std::vector<int64_t> dictionaries = DecodePageArray(dictionary_regions);
 
       std::vector<Loc> column(G);
       std::vector<int64_t> starts(G, std::numeric_limits<int64_t>::max());
@@ -757,10 +818,10 @@ public:
       std::vector<char> seen(G, 0);
       int group = 0;
       for (int page = 0; page < page_count; ++page) {
-        int64_t first_row = BitsetAt(encoded_first_rows, page);
+        int64_t first_row = first_rows[page];
         while (group + 1 < G && first_row >= range_ends_[group])
           ++group;
-        int64_t region = BitsetAt(encoded_page_regions, page);
+        int64_t region = page_regions[page];
         if (region < 0 || static_cast<size_t>(region + 1) >= offsets->size())
           throw std::runtime_error("data page has an invalid region ordinal");
         int64_t start = (*offsets)[region], end = (*offsets)[region + 1];
@@ -769,7 +830,7 @@ public:
         seen[group] = 1;
         starts[group] = std::min(starts[group], start);
         ends[group] = std::max(ends[group], end);
-        int64_t dictionary_plus_one = BitsetAt(dictionary_regions, page);
+        int64_t dictionary_plus_one = dictionaries[page];
         if (dictionary_plus_one > 0) {
           int64_t dictionary = dictionary_plus_one - 1;
           if (static_cast<size_t>(dictionary + 1) >= offsets->size())
@@ -804,8 +865,12 @@ private:
     Reader reader(region.data, region.size);
     for (Reader::Field f = reader.NextField(); f.type != T_STOP;
          f = reader.NextField()) {
-      if (f.id == field_id && f.type == T_STRUCT)
-        return DecodePageArray(ParseArrayPage(reader));
+      if (f.id == field_id && f.type == T_BINARY) {
+        ArrayPage array;
+        array.values = reader.BinarySpan();
+        array.num_values = C;
+        return DecodePageArray(array);
+      }
       reader.Skip(f.type);
     }
     throw std::runtime_error("page footer directory has no region array");

@@ -3,9 +3,8 @@
 **Status: design sketch**
 
 This sketch supersedes the earlier encoding-domain prototype. It adapts the modular footer to the
-page-first data model by separating physical byte addressing from logical page metadata. Most core
-per-page metadata is represented by aligned, dense, random-access arrays. The global region offset
-array and each projected column's codec stream use delta binary packing.
+page-first data model by separating physical byte addressing from logical page metadata. Readers
+can address a projected column directly, then sequentially decode compact metadata for that column.
 
 ## Design principles
 
@@ -19,6 +18,12 @@ array and each projected column's codec stream use delta binary packing.
   ordinal rather than repeating byte offsets and lengths.
 - Page ownership, logical order, row coverage, compression, and dictionary dependencies live in
   independently addressable column metadata.
+- Cross-column directories use fixed-width bit-packing. After selecting a column, arrays may be
+  decoded sequentially and use whichever of bit-packing or DBP is smaller.
+- Statistics sparsity is local to the statistics structures; the generic `EncodedArray` carries no
+  presence or random-access machinery.
+- `PageFirstModularFooter.thrift` includes only the standard `parquet.thrift`; it does not include
+  or reference the current modular-footer definition.
 
 ## Regions
 
@@ -48,14 +53,15 @@ region map is available, module-directory entries and all other locators use reg
 ## Required modules
 
 ```text
-ModularFooter
+PageFirstModularFooter
 ├── Schema
 ├── RegionMap
 ├── PageDirectory
 └── optional modules
-    ├── ColumnRangeStatistics
-    ├── BloomFilters
+    ├── RowRangeStatistics
     ├── FileMetadata
+    ├── SchemaIndex
+    ├── BloomFilters
     └── extensions
 ```
 
@@ -67,21 +73,22 @@ contains `num_row_groups`.
 ```thrift
 struct RegionMap {
   /** UINT64 absolute offsets; num_regions + 1 strictly increasing entries. */
-  1: required RegionOffsetArray region_offsets
+  1: required binary region_offsets
 }
 ```
 
-`RegionOffsetArray` uses strict Parquet `DELTA_BINARY_PACKED`. This is the only always-read
-sequential array in the core design. Readers decode and retain it before resolving region ordinals.
+`region_offsets` uses strict Parquet `DELTA_BINARY_PACKED`. Readers decode and retain the complete
+array before resolving region ordinals.
 
 ### Page directory
 
 The page directory locates an independently serialized page descriptor for each leaf column.
 Readers can therefore load page metadata in proportion to projection rather than decoding every
-column's logical page arrays.
+column's logical page arrays. Its locator field is a fixed-width bit-packed binary with one region
+ordinal per leaf column, supporting direct access by column ordinal.
 
-Each column descriptor contains one shared data-page count, one dictionary-encoding summary, five
-aligned fixed-width binaries, and one DBP codec stream:
+Each column descriptor contains one shared data-page count, one dictionary-encoding summary, and
+six encoded arrays:
 
 ```text
 is_fully_dictionary_encoded
@@ -100,13 +107,12 @@ A dictionary is compressed with the codec of the referring data page; all refere
 dictionary must therefore agree on codec. Dictionary encoding, value count, and uncompressed size
 remain available in its `PageHeader`.
 
-Every binary except `codecs` is `[u8 bit_width][packed values]` with O(1) positional access. The
-count is stored once rather than repeating generic `EncodedArray` framing for every field. Codecs
-use Parquet `DELTA_BINARY_PACKED`. A constant codec sequence uses one block and one miniblock sized
-to cover the complete column, so all deltas have bit width zero. Nonconstant sequences use
-128-value blocks with four 32-value miniblocks. There is no RLE, sparse presence, default value,
-domain table, or other coalescing. Value count and uncompressed size remain physically repeated
-once per data page. Physical region ordinals need not be monotonic.
+Each array independently uses the smaller of fixed-width bit-packing and Parquet
+`DELTA_BINARY_PACKED`. Its single binary starts with an encoding byte. A bit-packed payload then
+stores its bit width and LSB-first values; a DBP payload contains the standard DBP stream. The
+selected column is decoded sequentially. There is no RLE, sparse presence, default value, domain
+table, or other coalescing. Value count and uncompressed size remain physically repeated once per
+data page. Physical region ordinals need not be monotonic.
 
 `is_fully_dictionary_encoded` summarizes the complete column rather than each column chunk. Exact
 per-page encodings remain in page headers; direct dictionary-region references identify the pages
@@ -128,11 +134,16 @@ The current row-group statistics module is replaced by independently selected pe
 statistics. Ranges use the same absolute top-level row coordinate as page metadata. Statistics
 boundaries do not close pages or dictionaries.
 
-Each leaf column has one independently addressable descriptor. The column is implicit in the
-column-indexed locator array; a column without statistics has no descriptor entry. A participating
-column must cover every row in the file with a dense partition of statistics blocks. Its descriptor
-stores only absolute `range_start_rows`, beginning with zero and strictly increasing. Block `i` ends
-at start `i + 1`; the final block ends at the root's `num_rows`.
+Each participating leaf column has one independently addressable descriptor. The statistics
+directory has an optional LSB-first participation bitmap and a compact fixed-width packed array of
+descriptor region ordinals in column order. The bitmap is omitted when every column participates.
+A reader can test membership directly and obtain a compact-array index using popcount over the
+preceding bitmap bits. It may materialize the complete column-to-region lookup once rather than
+store rank checkpoints on disk. A column without statistics has no descriptor entry.
+
+A participating column must cover every row in the file with a dense partition of statistics
+blocks. Its descriptor stores only absolute `range_start_rows`, beginning with zero and strictly
+increasing. Block `i` ends at start `i + 1`; the final block ends at the root's `num_rows`.
 
 For example, a 10,000-row column partitioned at rows 1,000, 3,000, and 5,000 stores:
 
@@ -141,11 +152,13 @@ range_start_rows = [0, 1000, 3000, 5000]
 ```
 
 This describes `[0, 1000)`, `[1000, 3000)`, `[3000, 5000)`, and `[5000, 10000)`.
-`range_start_rows` uses Parquet `DELTA_BINARY_PACKED`, so locating a column descriptor is O(1) but
-decoding ranges within that column is sequential. Aligned optional arrays hold null counts, min/max
-values, exactness, NaN counts, and future statistics using the current modular `EncodedArray`
-sparsity. Every block must publish at least one statistic. Each column chooses its own dense
-partition, without a shared granularity, preamble, or row-group identity.
+`range_start_rows` uses the local adaptive `EncodedArray`, so locating a column descriptor is O(1)
+but decoding ranges within that column is sequential. Null and NaN counts are optional
+Compact-Thrift lists containing one value per range when present. Min/max shares one presence bit
+per range. Prefix lengths and bytes are stored separately, as are interleaved min/max suffix lengths
+and concatenated suffix bytes. Exactness is an interleaved min/max bitset and is omitted when every
+published bound is exact. Every block must publish at least one statistic. Each column chooses its
+own dense partition, without a shared granularity, preamble, or row-group identity.
 
 There is no separate page-level `ColumnIndex` module. A writer that wants page-granular pruning
 publishes row-range blocks that tile its pages. Placement maps matching row ranges to pages using
@@ -168,7 +181,7 @@ absolute offset/length pairs.
 | `total_compressed_sizes` | Derived from referenced region boundaries |
 | `total_uncompressed_sizes` | Sum of per-page uncompressed sizes |
 | `num_values` | Sum of per-page value counts for data pages |
-| `codecs` | Per-column DBP codec stream |
+| `codecs` | Per-column adaptive codec stream |
 | `physical_types` | Schema |
 | `is_fully_dictionary_encoded` | One boolean for the complete column |
 | `row_group_num_rows` | Removed; pages use absolute file row indexes |
@@ -193,8 +206,6 @@ page ordinal)`, rather than by row-group ordinal or physical region ordinal.
 - Whether the complete region map always fits the speculative-tail budget or needs block-level
   framing while remaining mandatory.
 - Representation of data pages that begin in the same repeated top-level row.
-- Whether fixed-width absolute first-row and region arrays remain acceptable at much larger scale,
-  or need a separately indexed random-access encoding.
 - Whether optional column summaries are required for resource planning in addition to per-page
   values.
 - Page and module encryption identities, integrity digests, and unknown-module preservation.
@@ -209,17 +220,17 @@ the same file to the page-first modules above.
 
 | Dataset | Column chunks (count) | Data pages (count) | Dictionary pages (count) | Total pages (count) | Current footer (bytes) | Current footer + offset indexes (bytes) | Column-chunk placement (bytes) | Page placement (bytes) | Placement change | Complete column-chunk footer (bytes) | Complete page footer (bytes) | Complete change |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| US Accidents | 50,830 | 50,830 | 36,465 | 87,295 | 4,747,144 | 5,872,211 | 694,618 | 686,667 | −1.1% | 1,764,414 | 1,759,451 | −0.3% |
-| FineWeb 10BT | 9,441 | 9,441 | 9,441 | 18,882 | 3,971,883 | 4,187,395 | 158,380 | 133,976 | −15.4% | 530,722 | 509,561 | −4.0% |
-| Hacker News | 15,022 | 15,022 | 12,876 | 27,898 | 1,840,138 | 2,177,310 | 223,029 | 227,528 | +2.0% | 598,045 | 603,440 | +0.9% |
-| Yellow Taxi | 80 | 145 | 80 | 225 | 11,212 | 13,868 | 1,404 | 2,927 | +108.5% | 5,877 | 7,753 | +31.9% |
+| US Accidents | 50,830 | 50,830 | 36,465 | 87,295 | 4,747,144 | 5,872,211 | 694,618 | 277,907 | −60.0% | 1,764,414 | 1,057,922 | −40.0% |
+| FineWeb 10BT | 9,441 | 9,441 | 9,441 | 18,882 | 3,971,883 | 4,187,395 | 158,380 | 63,668 | −59.8% | 530,722 | 371,512 | −30.0% |
+| Hacker News | 15,022 | 15,022 | 12,876 | 27,898 | 1,840,138 | 2,177,310 | 223,029 | 115,175 | −48.4% | 598,045 | 406,755 | −32.0% |
+| Yellow Taxi | 80 | 145 | 80 | 225 | 11,212 | 13,868 | 1,404 | 3,211 | +128.7% | 5,877 | 7,297 | +24.2% |
 
 | Dataset | Current modular row-group statistics (bytes) | Page-first row-range statistics (bytes) | Change |
 | --- | ---: | ---: | ---: |
-| US Accidents | 1,059,755 | 1,062,628 | +0.3% |
-| FineWeb 10BT | 371,353 | 374,588 | +0.9% |
-| Hacker News | 371,678 | 372,551 | +0.2% |
-| Yellow Taxi | 2,265 | 2,575 | +13.7% |
+| US Accidents | 1,059,755 | 769,859 | −27.4% |
+| FineWeb 10BT | 371,353 | 306,847 | −17.4% |
+| Hacker News | 371,678 | 288,219 | −22.5% |
+| Yellow Taxi | 2,265 | 1,835 | −19.0% |
 
 `Current footer + offset indexes` includes the serialized index blobs and the growth of the Thrift
 footer from adding each chunk's index offset and length. The index blobs alone are 718,427 bytes,
@@ -227,26 +238,29 @@ footer from adding each chunk's index offset and length. The index blobs alone a
 
 `Column-chunk placement` is the current modular proposal's serialized `placement` module alone;
 `Complete column-chunk footer` includes all modules emitted by Jiayi's converter. `Page placement`
-includes the DBP region-offset map, page directory, one per-column dictionary-encoding
-boolean, five fixed-width per-data-page arrays, and one DBP codec stream. Physical types remain in
+includes the DBP region-offset map, page directory, one per-column dictionary-encoding boolean,
+and six per-data-page arrays that independently select bit-packing or DBP. Physical types remain in
 the shared schema and `num_rows` remains in the shared root, so neither whole structure is charged
 to page placement. `Complete page footer` additionally includes schema, converted row-range
 statistics, file metadata, and the root. It covers the same module categories used in the current
 modular-footer comparison.
 
 The three large files have exactly one data page per column chunk. A Thrift offset index adds 211
-KiB to 1.07 MiB after locator growth. Describing only logical data pages makes page placement 15%
-smaller to 2% larger than column-chunk placement on those files. Dense DBP range starts bring
-page-first statistics to within 1% of current modular on the three large files, and their complete
-page-first footers range from 4% smaller to 1% larger than current modular.
+KiB to 1.07 MiB after locator growth. Adaptive per-page streams make page placement 48% to 60%
+smaller than column-chunk placement on the three large files. Yellow Taxi has only a few pages per
+column; selecting bit-packing cuts its placement increase from 418% to 129%. Dense Thrift count
+lists and split prefix/suffix framing make page-first statistics 17% to 27% smaller than current
+modular on these files.
 
-These measurements use the legacy physical layout. Except for codecs, the per-column arrays remain
-fixed-width absolute values even where the values happen to be monotonic. Codec savings depend on
-repetition; no other measured saving depends on runs, defaults, or shared dictionaries.
+These measurements use the legacy physical layout. Each of the six per-column arrays emits the
+smaller of its bit-packed and strict DBP forms. There are no runs, defaults, or shared dictionaries
+outside the values represented by those streams.
 
-## Flat-array decode results
+## Previous fixed-width decode results
 
-The C++ footer-decode harness has a fidelity-checked page-first resolver. `Page cold` decodes the
+These timings predate the adaptive `ColumnDataPages` representation and have not been regenerated.
+They apply to the preceding fixed-width per-page arrays. The C++ footer-decode harness has a
+fidelity-checked page-first resolver. `Page cold` decodes the
 mandatory DBP region offsets on each operation; `Page warm` retains the absolute offsets and
 measures projected column descriptors. Inputs are already in
 memory; each case runs for roughly 200 ms. Absolute timings are specific to an Intel Xeon 6975P.
@@ -265,8 +279,7 @@ above is included in footer-size accounting, but its decode workload has not bee
 measured.
 
 `Current Thrift` fully materializes the current Thrift footer into an object tree. `Page cold`
-includes the mandatory DBP region-offset decode; `Page warm` retains the resulting offsets. The
-flat page arrays are accessed directly without decoding preceding entries. In the
+includes the mandatory DBP region-offset decode; `Page warm` retains the resulting offsets. In the
 placement-only workload, retained-map page-first takes 0.91-0.96x current modular time on the three
 large files and 1.39x on Yellow Taxi. These results do not include I/O, page-header decoding,
 codec-stream decoding, or statistics. `Current Thrift + OffsetIndex` is a size comparison, not a

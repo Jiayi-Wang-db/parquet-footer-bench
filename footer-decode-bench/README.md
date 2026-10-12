@@ -39,8 +39,8 @@ numbers reflect decode work, not the allocator.
 | `walk` | today's nested footer: visit every column chunk, decode the projected ones. | O(all chunks) |
 | `index` | jump table: seek straight to each projected chunk. | O(projected) |
 | `modular` | `ModularFooter`: column-major bit-packed placement + a separate `ColumnStatistics` module. | O(projected) |
-| `page_cold` | page-first footer: decode the mandatory DBP region offsets, then directly access projected columns' fixed-width placement arrays. | O(all regions + projected pages) |
-| `page_warm` | page-first footer with the region map retained; placement fields are fixed-width random-access arrays. | O(projected pages) |
+| `page_cold` | page-first footer: decode the mandatory DBP region offsets, then decode projected columns' DBP page arrays. | O(all regions + projected pages) |
+| `page_warm` | page-first footer with the region map retained; projected columns' DBP page arrays are decoded sequentially. | O(projected pages) |
 
 Files: `footer_decode_bench.cc` (driver), `footer_formats.h` (the six resolvers),
 `plot_sweep.py`, `run_corpus.py`. Placement-only runs cross-check every resolver against the current
@@ -78,7 +78,10 @@ equivalent to 12.5-14.2 GB/s of decoded `int64_t` output. Encoded-input throughp
 because the maps have different packed bit widths. See
 `results/dbp-region-map-throughput.csv`.
 
-### Page-first result
+### Previous fixed-width page-first result
+
+The decode results in this section predate the current adaptive `ColumnDataPages` representation and
+have not been regenerated. They apply to the preceding fixed-width per-page arrays.
 
 The proposal's shape is a flat table with 2,000 columns and 10 row groups. The page-first
 comparison uses a real Parquet fixture with that shape so the converter can scan actual pages. Each
