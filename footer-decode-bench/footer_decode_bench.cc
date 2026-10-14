@@ -15,10 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// footer_decode_bench -- footer decoding speed across four footer layouts, all
-// resolving the SAME information for a projection: per projected column chunk,
-// {data_page_offset, total_compressed_size, null_count, min, max} -- what a
-// scan + row-group-pruning reader needs. No IO, no page decode.
+// footer_decode_bench -- footer decoding speed across current and experimental
+// layouts. Placement-only resolves projected page locations; the default also
+// consumes each layout's applicable statistics. No IO, no page decode.
 //
 //   standard  full Thrift materialization (a generated-Thrift reader, e.g.
 //             parquet-java's): decode the whole FileMetaData into objects. Cost
@@ -29,8 +28,9 @@
 //   index     jump table (FileMetadataFooterIndex.column_chunk_offsets): seek
 //   to
 //             each projected chunk. O(projected).
-//   modular   ModularFooter: column-major bit-packed placement + a separate
-//             ColumnStatistics module. O(projected).
+//   modular   ModularFooter placement, row-group statistics, and page indexes.
+//   par1      page placement, row-group statistics, and flat Column Index.
+//   par3      page placement and row-range statistics.
 //
 // The parser is shared (thrift_codec.h) and each layout is a Resolver
 // (footer_formats.h), so the difference measured here is the footer layout.
@@ -38,6 +38,8 @@
 // Inputs (from the sibling converters):
 //   jumptable-footer/parquet_to_jumptable input.parquet input.jt.parquet
 //   modular-footer/parquet_to_modular     input.parquet input.modular
+//   modular-footer/parquet_to_page_modular.py --format addendum ...
+//   modular-footer/parquet_to_page_modular.py --format full ...
 //
 // Build & run:
 //   c++ -std=c++17 -O2 footer_decode_bench.cc -o footer_decode_bench
@@ -104,7 +106,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "usage: %s file.jumptable.parquet [num_projected|--sweep] "
                  "[--placement-only] "
-                 "[file.modular] [file.page-modular]\n",
+                 "[file.modular] [file.par1-addendum] [file.par3-full]\n",
                  argv[0]);
     return 2;
   }
@@ -112,7 +114,7 @@ int main(int argc, char** argv) {
   bool sweep = false;
   bool include_stats = true;
   int proj = 1;
-  std::string mod_path, page_path;
+  std::string mod_path, addendum_path, full_path;
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--sweep") sweep = true;
@@ -121,8 +123,10 @@ int main(int argc, char** argv) {
     else if (!a.empty() && std::isdigit(static_cast<unsigned char>(a[0]))) proj = std::atoi(a.c_str());
     else if (mod_path.empty())
       mod_path = a;
-    else if (page_path.empty())
-      page_path = a;
+    else if (addendum_path.empty())
+      addendum_path = a;
+    else if (full_path.empty())
+      full_path = a;
     else {
       std::fprintf(stderr, "error: too many footer inputs\n");
       return 2;
@@ -143,32 +147,39 @@ int main(int argc, char** argv) {
     bool have_mod = !mod_path.empty();
     std::string mod;
     if (have_mod) mod = ReadWhole(mod_path);
-    bool have_page = !page_path.empty();
-    std::string page;
-    if (have_page)
-      page = ReadWhole(page_path);
+    bool have_addendum = !addendum_path.empty();
+    std::string addendum;
+    if (have_addendum)
+      addendum = ReadWhole(addendum_path);
+    bool have_full = !full_path.empty();
+    std::string full;
+    if (have_full)
+      full = ReadWhole(full_path);
 
     // Build the resolvers -- one uniform interface each.
     std::vector<std::unique_ptr<Resolver>> rs;
-    rs.push_back(std::make_unique<fdb::StandardResolver>(footer, C, G));
+    rs.push_back(std::make_unique<fdb::StandardResolver>(jt, footer, C, G));
     rs.push_back(std::make_unique<fdb::WalkResolver>(footer, C, G));   // index 1 = walk baseline
     rs.push_back(std::make_unique<fdb::IndexResolver>(footer, fi));
     if (have_mod) rs.push_back(std::make_unique<fdb::ModularResolver>(mod, C, G));
-    if (have_page) {
+    if (have_addendum || have_full) {
       std::vector<int64_t> range_ends = fdb::ReadRowGroupEnds(footer);
-      rs.push_back(
-          std::make_unique<fdb::PageResolver>(page, C, G, true, range_ends));
-      rs.push_back(
-          std::make_unique<fdb::PageResolver>(page, C, G, false, range_ends));
+      if (have_addendum)
+        rs.push_back(std::make_unique<fdb::PageResolver>(addendum, C, G, true,
+                                                         range_ends));
+      if (have_full)
+        rs.push_back(
+            std::make_unique<fdb::PageResolver>(full, C, G, true, range_ends));
     }
     const size_t WALK = 1;
 
     // Fidelity: every resolver must agree with the walk on placement + stats.
     for (const std::vector<char>& want : {Mask(C, std::min(std::max(proj, 1), C)), Mask(C, C)}) {
-      Placement ref = rs[WALK]->Resolve(want, include_stats);
+      Placement ref = rs[WALK]->Resolve(want, false);
       for (const auto& r : rs)
-        if (r->Resolve(want, include_stats) != ref)
-          throw std::runtime_error(r->name() + " disagrees with walk on placement+stats");
+        if (r->Resolve(want, false) != ref)
+          throw std::runtime_error(r->name() +
+                                   " disagrees with walk on placement");
     }
 
     if (sweep) {
@@ -199,9 +210,12 @@ int main(int argc, char** argv) {
 
     std::printf("jumptable file  %s  (footer %u B)\n", jt_path.c_str(), flen);
     if (have_mod) std::printf("modular file    %s  (%zu B)\n", mod_path.c_str(), mod.size());
-    if (have_page)
-      std::printf("page file       %s  (%zu B)\n", page_path.c_str(),
-                  page.size());
+    if (have_addendum)
+      std::printf("PAR1 addendum   %s  (%zu B)\n", addendum_path.c_str(),
+                  addendum.size());
+    if (have_full)
+      std::printf("PAR3 full       %s  (%zu B)\n", full_path.c_str(),
+                  full.size());
     std::printf("columns %d   row_groups %d   column_chunks %d   projected %d of %d\n",
                 C, G, C * G, K, C);
     if (include_stats)

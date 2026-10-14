@@ -18,15 +18,15 @@
 // footer_formats.h -- the format-decoding layer, built on thrift_codec.h.
 //
 // Every footer variant is a Resolver: given a column projection, return the
-// {placement + statistics} each projected chunk resolves to. All four share the
-// same API so the driver treats them uniformly.
+// legacy chunk-shaped placement result and consume the applicable statistics.
+// The shared API lets the driver compare layouts uniformly.
 //
-// min/max are returned as spans (min = min_a ++ min_b) into a persistent buffer,
-// not owned strings -- so the lean readers (walk / index / modular) never copy
-// or reconstruct stat bytes, and the benchmark measures decode work, not the
-// allocator. A modular bound is two segments (prefix + suffix); the others are
-// one. `standard` deliberately materializes everything (its modeled cost) into a
-// stable member and points its spans there.
+// min/max are returned as spans (min = min_a ++ min_b) into a persistent
+// buffer, not owned strings -- so the lean readers (walk / index / modular)
+// never copy or reconstruct stat bytes, and the benchmark measures decode work,
+// not the allocator. A modular bound is two segments (prefix + suffix); the
+// others are one. `standard` deliberately materializes everything (its modeled
+// cost) into a stable member and points its spans there.
 
 #ifndef PFB_FOOTER_FORMATS_H_
 #define PFB_FOOTER_FORMATS_H_
@@ -88,6 +88,10 @@ enum { // FileMetaData / RowGroup / ColumnChunk / ColumnMetaData / Statistics
   RG_COLUMNS = 1,
   RG_NUM_ROWS = 3,
   CC_META_DATA = 3,
+  CC_OFFSET_INDEX_OFFSET = 4,
+  CC_OFFSET_INDEX_LENGTH = 5,
+  CC_COLUMN_INDEX_OFFSET = 6,
+  CC_COLUMN_INDEX_LENGTH = 7,
   CM_TOTAL_COMPRESSED = 7,
   CM_DATA_PAGE_OFFSET = 9,
   CM_STATISTICS = 12,
@@ -100,21 +104,39 @@ enum { // FileMetaData / RowGroup / ColumnChunk / ColumnMetaData / Statistics
 enum {  // FileMetadataFooterIndex (jump table)
   IDX_NUM_LEAF = 1, IDX_NUM_RG = 2, IDX_CHUNK_OFFSETS = 3,
 };
-enum {  // ModularFooter
-  K_PLACEMENT = 1, K_ROW_GROUP_STATISTICS = 2, MOD_DIRECTORY = 5,
-  DIR_KIND = 1, DIR_LOCATION = 2, LOC_OFFSET = 1,
-  PLACE_DATA_PAGE_OFFSETS = 1, PLACE_TOTAL_COMPRESSED = 4,
-  CS_NULL_COUNTS = 1, CS_MINMAX_PREFIXES = 2, CS_MIN_SUFFIXES = 3, CS_MAX_SUFFIXES = 4,
+enum { // ModularFooter
+  K_PLACEMENT = 1,
+  K_ROW_GROUP_STATISTICS = 2,
+  K_OFFSET_INDEX = 3,
+  K_COLUMN_INDEX = 4,
+  MOD_DIRECTORY = 5,
+  DIR_KIND = 1,
+  DIR_LOCATION = 2,
+  LOC_OFFSET = 1,
+  PLACE_DATA_PAGE_OFFSETS = 1,
+  PLACE_TOTAL_COMPRESSED = 4,
+  CS_NULL_COUNTS = 1,
+  CS_MINMAX_PREFIXES = 2,
+  CS_MIN_SUFFIXES = 3,
+  CS_MAX_SUFFIXES = 4,
   RGS_COLUMN_OFFSETS = 1,
   // EncodedArray field ids: 1 num_values, 2 values, 3 encoding, 4 presence.
-  EA_NUM_VALUES = 1, EA_VALUES = 2, EA_ENCODING = 3, EA_PRESENCE = 4,
+  EA_NUM_VALUES = 1,
+  EA_VALUES = 2,
+  EA_ENCODING = 3,
+  EA_PRESENCE = 4,
 };
 enum { // PageFirstModularFooter
-  PAGE_MOD_DIRECTORY = 4,
+  PAGE_FULL_MOD_DIRECTORY = 4,
+  PAGE_ADDENDUM_MOD_DIRECTORY = 5,
   PAGE_DIR_KIND = 1,
   PAGE_DIR_REGION = 2,
   PK_PAGE_DIRECTORY = 1,
+  PK_STATISTICS = 2,
+  PK_FLAT_COLUMN_INDEX = 3,
   REGION_MAP_OFFSETS = 1,
+  REGION_MAP_ROW_GROUP_ORDINALS = 2,
+  REGION_MAP_ROW_GROUP_NUM_ROWS = 3,
   PAGE_DIRECTORY_REGIONS = 1,
   COLUMN_PAGE_REGIONS = 1,
   COLUMN_PAGE_FIRST_ROWS = 2,
@@ -234,55 +256,84 @@ inline std::vector<int64_t> ReadRowGroupEnds(const std::string &footer) {
 // of projection -- that allocation IS the cost it models.
 class StandardResolver : public Resolver {
  public:
-  StandardResolver(const std::string& footer, int C, int G) : Resolver(C, G), footer_(footer) {}
-  std::string name() const override { return "standard"; }
-  Placement Resolve(const std::vector<char> &want,
-                    bool include_stats = true) const override {
-    Reader r(footer_.data(), footer_.size());
-    tree_ = DecodeValue(r, T_STRUCT);  // materialized; stays alive as a member
-    std::vector<Loc> grid(static_cast<size_t>(C) * G);
-    if (const Value* rgs = tree_.field(FMD_ROW_GROUPS)) {
-      for (int g = 0; g < static_cast<int>(rgs->items.size()) && g < G; ++g) {
-        const Value* cols = rgs->items[g].field(RG_COLUMNS);
-        if (!cols) continue;
-        for (int c = 0; c < static_cast<int>(cols->items.size()) && c < C; ++c) {
-          const Value* md = cols->items[c].field(CC_META_DATA);
-          Loc L;
-          if (md) {
-            if (const Value* v = md->field(CM_DATA_PAGE_OFFSET)) L.off = v->num;
-            if (const Value* v = md->field(CM_TOTAL_COMPRESSED)) L.size = v->num;
-            if (include_stats) {
-              if (const Value *st = md->field(CM_STATISTICS)) {
-                if (const Value *nc = st->field(ST_NULL_COUNT)) {
-                  L.has_null = true;
-                  L.null_count = nc->num;
-                }
-                const Value *mn = st->field(ST_MIN_VALUE);
-                if (!mn)
-                  mn = st->field(ST_MIN_DEP);
-                const Value *mx = st->field(ST_MAX_VALUE);
-                if (!mx)
-                  mx = st->field(ST_MAX_DEP);
-                if (mn && mx) {
-                  L.has_mm = true;
-                  L.min_a = {mn->bin.data(),
-                             static_cast<uint32_t>(mn->bin.size())};
-                  L.max_a = {mx->bin.data(),
-                             static_cast<uint32_t>(mx->bin.size())};
-                }
-              }
-            }
-          }
-          grid[static_cast<size_t>(c) * G + g] = L;
-        }
-      }
-    }
-    return Gather(grid, want, C, G);
-  }
+   StandardResolver(const std::string &file, const std::string &footer, int C,
+                    int G)
+       : Resolver(C, G), file_(file), footer_(footer) {}
+   std::string name() const override { return "standard"; }
+   Placement Resolve(const std::vector<char> &want,
+                     bool include_stats = true) const override {
+     Reader r(footer_.data(), footer_.size());
+     tree_ = DecodeValue(r, T_STRUCT); // materialized; stays alive as a member
+     page_index_trees_.clear();
+     std::vector<Loc> grid(static_cast<size_t>(C) * G);
+     if (const Value *rgs = tree_.field(FMD_ROW_GROUPS)) {
+       for (int g = 0; g < static_cast<int>(rgs->items.size()) && g < G; ++g) {
+         const Value *cols = rgs->items[g].field(RG_COLUMNS);
+         if (!cols)
+           continue;
+         for (int c = 0; c < static_cast<int>(cols->items.size()) && c < C;
+              ++c) {
+           const Value &chunk = cols->items[c];
+           const Value *md = cols->items[c].field(CC_META_DATA);
+           Loc L;
+           if (md) {
+             if (const Value *v = md->field(CM_DATA_PAGE_OFFSET))
+               L.off = v->num;
+             if (const Value *v = md->field(CM_TOTAL_COMPRESSED))
+               L.size = v->num;
+             if (include_stats) {
+               if (const Value *st = md->field(CM_STATISTICS)) {
+                 if (const Value *nc = st->field(ST_NULL_COUNT)) {
+                   L.has_null = true;
+                   L.null_count = nc->num;
+                 }
+                 const Value *mn = st->field(ST_MIN_VALUE);
+                 if (!mn)
+                   mn = st->field(ST_MIN_DEP);
+                 const Value *mx = st->field(ST_MAX_VALUE);
+                 if (!mx)
+                   mx = st->field(ST_MAX_DEP);
+                 if (mn && mx) {
+                   L.has_mm = true;
+                   L.min_a = {mn->bin.data(),
+                              static_cast<uint32_t>(mn->bin.size())};
+                   L.max_a = {mx->bin.data(),
+                              static_cast<uint32_t>(mx->bin.size())};
+                 }
+               }
+             }
+           }
+           grid[static_cast<size_t>(c) * G + g] = L;
+           if (want[c]) {
+             DecodePageIndex(chunk, CC_OFFSET_INDEX_OFFSET,
+                             CC_OFFSET_INDEX_LENGTH);
+             if (include_stats)
+               DecodePageIndex(chunk, CC_COLUMN_INDEX_OFFSET,
+                               CC_COLUMN_INDEX_LENGTH);
+           }
+         }
+       }
+     }
+     return Gather(grid, want, C, G);
+   }
 
  private:
-  const std::string& footer_;
-  mutable Value tree_;  // holds the materialized values the spans point into
+   void DecodePageIndex(const Value &chunk, int offset_field,
+                        int length_field) const {
+     const Value *offset = chunk.field(offset_field);
+     const Value *length = chunk.field(length_field);
+     if (!offset || !length || offset->num < 0 || length->num <= 0 ||
+         static_cast<uint64_t>(offset->num + length->num) > file_.size())
+       return;
+     Reader reader(file_.data() + offset->num,
+                   static_cast<size_t>(length->num));
+     page_index_trees_.push_back(DecodeValue(reader, T_STRUCT));
+   }
+
+   const std::string &file_;
+   const std::string &footer_;
+   mutable Value tree_; // holds the materialized values the spans point into
+   mutable std::vector<Value> page_index_trees_;
 };
 
 // ------- walk: today's reader -- walk every row group and column chunk, decode
@@ -572,6 +623,42 @@ inline void PresentBytes(const ArrayPage& ap, int G, std::vector<char>& has, std
   }
 }
 
+inline uint64_t ConsumeIntArray(const ArrayPage &ap) {
+  uint64_t sum = 0;
+  if (ap.encoding == PAGE_ARRAY_DELTA_BINARY_PACKED) {
+    for (int64_t value : DecodePageArray(ap))
+      sum += static_cast<uint64_t>(value);
+    return sum;
+  }
+  if (ap.presence.size == 0) {
+    for (int i = 0; i < ap.num_values; ++i)
+      sum += static_cast<uint64_t>(BitsetAt(ap, i));
+    return sum;
+  }
+  APPresence presence = ParsePresence(ap);
+  for (int i = 0; i < presence.np; ++i) {
+    sum += ExtractBits(presence.pos, i, presence.wpos);
+    sum += ExtractBits(APData(ap), i, APWidth(ap));
+  }
+  return sum;
+}
+
+inline uint64_t ConsumeBytesArray(const ArrayPage &ap) {
+  int count = ap.num_values;
+  uint64_t sum = 0;
+  if (ap.presence.size != 0) {
+    APPresence presence = ParsePresence(ap);
+    count = presence.np;
+    for (int i = 0; i < presence.np; ++i)
+      sum += ExtractBits(presence.pos, i, presence.wpos);
+  }
+  int width = APWidth(ap);
+  const uint8_t *offsets = APData(ap);
+  for (int i = 0; i <= count; ++i)
+    sum += ExtractBits(offsets, i, width);
+  return sum;
+}
+
 // ------- modular: placement from the column-major bit-packed PlacementModule,
 // statistics from a separate ColumnStatistics module. min/max are prefix + suffix
 // spans into the modular buffer -- reconstructed only logically, never copied.
@@ -582,7 +669,8 @@ class ModularResolver : public Resolver {
       throw std::runtime_error("modular file missing MFT1 trailer -- rebuild parquet_to_modular");
     int64_t root_off = 0;
     std::memcpy(&root_off, mod.data() + mod.size() - 12, 8);
-    int64_t place_off = -1, stats_off = -1;
+    int64_t place_off = -1, stats_off = -1, offset_index_off = -1,
+            column_index_off = -1;
     Reader rr(mod.data() + root_off, mod.size() - static_cast<size_t>(root_off));
     for (Reader::Field f = rr.NextField(); f.type != T_STOP; f = rr.NextField()) {
       if (f.id != MOD_DIRECTORY || f.type != T_LIST) { rr.Skip(f.type); continue; }
@@ -603,6 +691,10 @@ class ModularResolver : public Resolver {
         rr.StructEnd(s);
         if (kind == K_PLACEMENT) place_off = off;
         else if (kind == K_ROW_GROUP_STATISTICS) stats_off = off;
+        else if (kind == K_OFFSET_INDEX)
+          offset_index_off = off;
+        else if (kind == K_COLUMN_INDEX)
+          column_index_off = off;
       }
     }
     if (place_off < 0) throw std::runtime_error("modular footer has no placement module");
@@ -627,6 +719,8 @@ class ModularResolver : public Resolver {
         } else sr.Skip(f.type);
       }
     }
+    offset_index_offsets_ = ReadPageIndexDirectory(offset_index_off);
+    column_index_offsets_ = ReadPageIndexDirectory(column_index_off);
   }
   std::string name() const override { return "modular"; }
   Placement Resolve(const std::vector<char> &want,
@@ -634,6 +728,9 @@ class ModularResolver : public Resolver {
     Placement out;
     for (int c = 0; c < C; ++c) {
       if (!want[c]) continue;
+      ConsumePageIndexes(offset_index_offsets_, c);
+      if (include_stats)
+        ConsumePageIndexes(column_index_offsets_, c);
       if (have_stats_ && include_stats)
         DecodeColumnStatistics(col_off_[c], col_off_[c + 1] - col_off_[c]);
       for (int g = 0; g < G; ++g) {
@@ -656,6 +753,50 @@ class ModularResolver : public Resolver {
   }
 
  private:
+   std::vector<int64_t> ReadPageIndexDirectory(int64_t offset) const {
+     if (offset < 0)
+       return {};
+     Reader reader(mod_.data() + offset,
+                   mod_.size() - static_cast<size_t>(offset));
+     for (Reader::Field field = reader.NextField(); field.type != T_STOP;
+          field = reader.NextField()) {
+       if (field.id == 1 && field.type == T_STRUCT) {
+         ArrayPage array = ParseArrayPage(reader);
+         std::vector<int64_t> offsets(array.num_values);
+         for (int i = 0; i < array.num_values; ++i)
+           offsets[i] = BitsetAt(array, i);
+         return offsets;
+       }
+       reader.Skip(field.type);
+     }
+     return {};
+   }
+
+   void ConsumePageIndexes(const std::vector<int64_t> &offsets,
+                           int column) const {
+     if (offsets.empty())
+       return;
+     for (int group = 0; group < G; ++group) {
+       size_t chunk = static_cast<size_t>(column) * G + group;
+       if (chunk + 1 >= offsets.size() || offsets[chunk] == offsets[chunk + 1])
+         continue;
+       Reader reader(mod_.data() + offsets[chunk],
+                     static_cast<size_t>(offsets[chunk + 1] - offsets[chunk]));
+       for (Reader::Field field = reader.NextField(); field.type != T_STOP;
+            field = reader.NextField()) {
+         if (field.type == T_STRUCT) {
+           ArrayPage array = ParseArrayPage(reader);
+           sink_ ^= field.id >= 4 && field.id <= 6 ? ConsumeBytesArray(array)
+                                                   : ConsumeIntArray(array);
+         } else if (field.type == T_I32) {
+           sink_ ^= static_cast<uint64_t>(reader.I32());
+         } else {
+           reader.Skip(field.type);
+         }
+       }
+     }
+   }
+
   // Fill the reusable per-column buffers from one ColumnStatistics module. No
   // allocation per column -- only the present-flags need resetting (the value
   // buffers are gated by them). Spans point into mod_, so emitted Locs stay valid
@@ -682,7 +823,9 @@ class ModularResolver : public Resolver {
   const std::string& mod_;
   ArrayPage dpo_, tcs_;
   std::vector<int64_t> col_off_;
+  std::vector<int64_t> offset_index_offsets_, column_index_offsets_;
   bool have_stats_ = false;
+  mutable uint64_t sink_ = 0;
   mutable std::vector<char> s_has_null_, s_has_mm_, s_hp_, s_hms_, s_hxs_;
   mutable std::vector<int64_t> s_null_count_;
   mutable std::vector<Span> s_pref_, s_minsuf_, s_maxsuf_;
@@ -698,9 +841,12 @@ public:
                const std::vector<int64_t> &range_ends)
       : Resolver(C, G), mod_(mod), cold_(cold), range_ends_(range_ends) {
     constexpr size_t kTrailerSize = 36;
-    if (mod.size() < kTrailerSize ||
-        std::memcmp(mod.data() + mod.size() - 4, "PMF1", 4) != 0)
-      throw std::runtime_error("page footer missing PMF1 trailer");
+    if (mod.size() < kTrailerSize)
+      throw std::runtime_error("page footer is shorter than its trailer");
+    const char *magic = mod.data() + mod.size() - 4;
+    addendum_ = std::memcmp(magic, "PMA1", 4) == 0;
+    if (!addendum_ && std::memcmp(magic, "PMF3", 4) != 0)
+      throw std::runtime_error("page footer has unknown magic");
     int64_t map_offset = 0, map_length = 0, root_offset = 0, root_length = 0;
     const char *trailer = mod.data() + mod.size() - kTrailerSize;
     std::memcpy(&map_offset, trailer, 8);
@@ -710,13 +856,14 @@ public:
     if (map_length <= 0 || root_length <= 0 ||
         static_cast<uint64_t>(map_length + root_length) >
             mod.size() - kTrailerSize)
-      throw std::runtime_error("invalid PMF1 trailer lengths");
+      throw std::runtime_error("invalid page-footer trailer lengths");
     size_t root_position =
         mod.size() - kTrailerSize - static_cast<size_t>(root_length);
     size_t map_position = root_position - static_cast<size_t>(map_length);
     base_ = map_offset - static_cast<int64_t>(map_position);
     if (root_offset - base_ != static_cast<int64_t>(root_position))
-      throw std::runtime_error("PMF1 trailer offsets disagree with lengths");
+      throw std::runtime_error(
+          "page-footer trailer offsets disagree with lengths");
 
     Reader map_reader(mod.data() + map_position,
                       static_cast<size_t>(map_length));
@@ -724,16 +871,46 @@ public:
          f = map_reader.NextField()) {
       if (f.id == REGION_MAP_OFFSETS && f.type == T_BINARY)
         encoded_region_offsets_ = DbpArray(map_reader.BinarySpan());
+      else if (f.id == REGION_MAP_ROW_GROUP_ORDINALS && f.type == T_BINARY)
+        encoded_row_group_ordinals_ = DbpArray(map_reader.BinarySpan());
+      else if (f.id == REGION_MAP_ROW_GROUP_NUM_ROWS && f.type == T_BINARY)
+        encoded_row_group_num_rows_ = DbpArray(map_reader.BinarySpan());
       else
         map_reader.Skip(f.type);
     }
     region_offsets_ = DecodePageArray(encoded_region_offsets_);
+    if (addendum_) {
+      std::vector<int64_t> row_group_ordinals =
+          DecodePageArray(encoded_row_group_ordinals_);
+      std::vector<int64_t> row_group_num_rows =
+          DecodePageArray(encoded_row_group_num_rows_);
+      if (row_group_ordinals.size() != static_cast<size_t>(G + 1) ||
+          row_group_num_rows.size() != static_cast<size_t>(G))
+        throw std::runtime_error("PAR1 row-group arrays have invalid counts");
+      int64_t total_rows = 0;
+      for (int g = 0; g < G; ++g) {
+        if (row_group_ordinals[g] < 0 ||
+            row_group_ordinals[g] > row_group_ordinals[g + 1] ||
+            static_cast<size_t>(row_group_ordinals[g + 1]) >=
+                region_offsets_.size() ||
+            row_group_num_rows[g] < 0)
+          throw std::runtime_error("PAR1 row-group arrays have invalid values");
+        total_rows += row_group_num_rows[g];
+      }
+      if (range_ends_.size() != static_cast<size_t>(G) ||
+          (G && total_rows != range_ends_.back()))
+        throw std::runtime_error(
+            "PAR1 row-group rows disagree with source metadata");
+    }
 
-    int64_t page_directory = -1;
+    int64_t page_directory = -1, statistics_directory = -1,
+            column_index_directory = -1;
     Reader root(mod.data() + root_position, static_cast<size_t>(root_length));
     for (Reader::Field f = root.NextField(); f.type != T_STOP;
          f = root.NextField()) {
-      if (f.id != PAGE_MOD_DIRECTORY || f.type != T_LIST) {
+      int directory_field =
+          addendum_ ? PAGE_ADDENDUM_MOD_DIRECTORY : PAGE_FULL_MOD_DIRECTORY;
+      if (f.id != directory_field || f.type != T_LIST) {
         root.Skip(f.type);
         continue;
       }
@@ -754,11 +931,18 @@ public:
         root.StructEnd(state);
         if (kind == PK_PAGE_DIRECTORY)
           page_directory = region;
+        else if (kind == PK_STATISTICS)
+          statistics_directory = region;
+        else if (addendum_ && kind == PK_FLAT_COLUMN_INDEX)
+          column_index_directory = region;
       }
     }
     if (page_directory < 0)
       throw std::runtime_error("page footer is missing a required directory");
     page_regions_ = ReadDenseDirectory(page_directory, PAGE_DIRECTORY_REGIONS);
+    statistics_regions_ = ReadSparseDirectory(
+        statistics_directory, addendum_ ? nullptr : &boundary_orders_);
+    column_index_regions_ = ReadSparseDirectory(column_index_directory);
     if (static_cast<int>(page_regions_.size()) != C)
       throw std::runtime_error(
           "page footer directory has the wrong column count");
@@ -768,19 +952,24 @@ public:
   }
 
   std::string name() const override {
-    return cold_ ? "page_cold" : "page_warm";
+    if (addendum_)
+      return cold_ ? "par1_addendum" : "par1_addendum_warm";
+    return cold_ ? "par3_full" : "par3_full_warm";
   }
 
   Placement Resolve(const std::vector<char> &want,
                     bool include_stats = true) const override {
-    if (include_stats)
-      throw std::runtime_error(
-          "page resolver supports placement-only benchmarks");
     std::vector<int64_t> decoded_offsets;
     const std::vector<int64_t> *offsets = &region_offsets_;
     if (cold_) {
       decoded_offsets = DecodePageArray(encoded_region_offsets_);
       offsets = &decoded_offsets;
+      if (addendum_) {
+        for (int64_t value : DecodePageArray(encoded_row_group_ordinals_))
+          sink_ ^= static_cast<uint64_t>(value);
+        for (int64_t value : DecodePageArray(encoded_row_group_num_rows_))
+          sink_ ^= static_cast<uint64_t>(value);
+      }
     }
     Placement out;
     for (int c = 0; c < C; ++c) {
@@ -826,6 +1015,10 @@ public:
       std::vector<int64_t> page_regions = DecodePageArray(encoded_page_regions);
       std::vector<int64_t> first_rows = DecodePageArray(encoded_first_rows);
       std::vector<int64_t> dictionaries = DecodePageArray(dictionary_regions);
+      for (ArrayPage *array :
+           {&page_codecs, &page_num_values, &page_uncompressed_sizes})
+        for (int64_t value : DecodePageArray(*array))
+          sink_ ^= static_cast<uint64_t>(value);
 
       std::vector<Loc> column(G);
       std::vector<int64_t> starts(G, std::numeric_limits<int64_t>::max());
@@ -859,6 +1052,13 @@ public:
         if (seen[g])
           column[g].size = ends[g] - starts[g];
       out.insert(out.end(), column.begin(), column.end());
+      if (include_stats) {
+        if (!addendum_ && boundary_orders_[c] >= 0)
+          sink_ ^= static_cast<uint64_t>(boundary_orders_[c]);
+        ConsumeStatisticsDescriptor(statistics_regions_, c, false);
+        if (addendum_)
+          ConsumeStatisticsDescriptor(column_index_regions_, c, true);
+      }
     }
     return out;
   }
@@ -891,11 +1091,101 @@ private:
     throw std::runtime_error("page footer directory has no region array");
   }
 
+  std::vector<int64_t>
+  ReadSparseDirectory(int64_t ordinal,
+                      std::vector<int> *boundary_orders = nullptr) const {
+    std::vector<int64_t> regions(C, -1);
+    if (boundary_orders)
+      boundary_orders->assign(C, -1);
+    if (ordinal < 0)
+      return regions;
+    Span presence, encoded_regions, encoded_boundary_orders;
+    Span region = Region(ordinal, region_offsets_);
+    Reader reader(region.data, region.size);
+    for (Reader::Field field = reader.NextField(); field.type != T_STOP;
+         field = reader.NextField()) {
+      if (field.id == 1 && field.type == T_BINARY)
+        presence = reader.BinarySpan();
+      else if (field.id == 2 && field.type == T_BINARY)
+        encoded_regions = reader.BinarySpan();
+      else if (field.id == 3 && field.type == T_BINARY)
+        encoded_boundary_orders = reader.BinarySpan();
+      else
+        reader.Skip(field.type);
+    }
+    int count = C;
+    if (presence.size != 0) {
+      count = 0;
+      for (int c = 0; c < C; ++c)
+        count += (static_cast<uint8_t>(presence.data[c / 8]) >> (c % 8)) & 1;
+    }
+    ArrayPage array;
+    array.values = encoded_regions;
+    array.num_values = count;
+    std::vector<int64_t> dense = DecodePageArray(array);
+    int index = 0;
+    for (int c = 0; c < C; ++c) {
+      bool present =
+          presence.size == 0 ||
+          ((static_cast<uint8_t>(presence.data[c / 8]) >> (c % 8)) & 1);
+      if (present) {
+        regions[c] = dense[index];
+        if (boundary_orders) {
+          if (encoded_boundary_orders.size < 1 ||
+              static_cast<uint8_t>(encoded_boundary_orders.data[0]) != 2)
+            throw std::runtime_error(
+                "statistics directory has invalid boundary orders");
+          const uint8_t *packed = reinterpret_cast<const uint8_t *>(
+              encoded_boundary_orders.data + 1);
+          (*boundary_orders)[c] = static_cast<int>(ExtractBitsBounded(
+              packed, encoded_boundary_orders.size - 1, index, 2));
+        }
+        ++index;
+      }
+    }
+    return regions;
+  }
+
+  void ConsumeStatisticsDescriptor(const std::vector<int64_t> &regions,
+                                   int column, bool column_index) const {
+    if (column >= static_cast<int>(regions.size()) || regions[column] < 0)
+      return;
+    Span descriptor = Region(regions[column], region_offsets_);
+    Reader reader(descriptor.data, descriptor.size);
+    for (Reader::Field field = reader.NextField(); field.type != T_STOP;
+         field = reader.NextField()) {
+      if (field.type == T_STRUCT) {
+        if (addendum_) {
+          ArrayPage array = ParseArrayPage(reader);
+          bool bytes = column_index ? field.id >= 4 && field.id <= 6
+                                    : field.id >= 2 && field.id <= 4;
+          sink_ ^= bytes ? ConsumeBytesArray(array) : ConsumeIntArray(array);
+        } else {
+          ArrayPage array = ParseColumnArray(reader);
+          for (int64_t value : DecodePageArray(array))
+            sink_ ^= static_cast<uint64_t>(value);
+        }
+      } else if (field.type == T_BINARY) {
+        Span bytes = reader.BinarySpan();
+        sink_ ^= bytes.size;
+        if (bytes.size)
+          sink_ ^= static_cast<uint8_t>(bytes.data[0]);
+      } else {
+        reader.Skip(field.type);
+      }
+    }
+  }
+
   const std::string &mod_;
   bool cold_;
+  bool addendum_ = false;
   int64_t base_ = 0;
-  ArrayPage encoded_region_offsets_;
-  std::vector<int64_t> region_offsets_, page_regions_, range_ends_;
+  ArrayPage encoded_region_offsets_, encoded_row_group_ordinals_,
+      encoded_row_group_num_rows_;
+  std::vector<int64_t> region_offsets_, page_regions_, statistics_regions_,
+      column_index_regions_, range_ends_;
+  std::vector<int> boundary_orders_;
+  mutable uint64_t sink_ = 0;
 };
 
 }  // namespace fdb

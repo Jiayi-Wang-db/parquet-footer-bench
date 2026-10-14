@@ -86,85 +86,91 @@ side would not be an apples-to-apples footer-size comparison.
 
 ## Page-first modular footer
 
-The [design notes](../modular-footer/PageFirstModularFooter.md) and
-[`PageFirstModularFooter.thrift`](../modular-footer/PageFirstModularFooter.thrift) replace
-column-chunk placement with two layers:
-an always-read array of absolute region offsets and independently addressed logical page
-descriptors for each column. Every complete serialized page is exactly one region. Region offsets
-use strict Parquet `DELTA_BINARY_PACKED`. Each column descriptor stores one whole-column
-dictionary-encoding boolean and six self-counting arrays that independently choose the smaller of
-fixed-width bit-packing and DBP. Exact encodings remain in page headers. Dictionary pages remain
-physical regions and are reached through direct data-page references; they do not occupy logical
-descriptor rows. Dictionary references are not coalesced. A schema-present column with zero data
-pages represents an all-null column.
+The [design notes](../modular-footer/PageFirstModularFooter.md) split the transition into
+[`PageFirstModularFooterAddendum.thrift`](../modular-footer/PageFirstModularFooterAddendum.thrift)
+for PAR1 and [`PageFirstModularFooterFull.thrift`](../modular-footer/PageFirstModularFooterFull.thrift)
+for PAR3. Both replace column-chunk placement with an always-read DBP region map and independently
+addressed per-column page descriptors. PAR1 retains required row-group arrays, row-group
+statistics, and a flattened Column Index. PAR3 has no row groups or Column Index and uses row-range
+statistics.
 
-The converter scans actual `PageHeader` values because the legacy footer does not contain a page
-inventory. DataPageV2 carries its top-level row count directly. For nested DataPageV1 input, the
-converter decodes repetition levels; uncompressed, Snappy, and GZIP pages are currently supported.
+These measurements use files produced by Raincloud commit `7357517`'s actual parquet-java 1.17.1
+sidecar target. The target defaults to ZSTD, a 128 MiB encoded row-group target, 1 MiB pages, a
+20,000-row page limit, dictionaries, statistics, checksums, and page indexes. Every output
+self-verified against its canonical Arrow input. Offset Index covers every chunk; Column Index
+covers 88 of FineWeb's 99 chunks and every chunk in the other three files.
+
+After building Raincloud's `:parquet-java:installDist` target, regenerate the corpus with:
+
+```sh
+python3 real-footer-size/rewrite_with_raincloud_parquet_java.py \
+  --writer /path/to/raincloud-export-parquet-java
+```
 
 ```sh
 python3 modular-footer/parquet_to_page_modular.py \
-  real-footer-size/data/yellow-tripdata-2025-01.parquet \
-  /tmp/yellow.page-modular
+  --format addendum \
+  real-footer-size/data/raincloud-parquet-java/yellow-tripdata-2025-01.parquet \
+  /tmp/yellow.addendum
 
-python3 real-footer-size/page_footer_size.py
+python3 real-footer-size/page_first_split_size.py
 ```
 
-The comparison script reports:
+The comparison script reports five semantic tiers:
 
-1. the current byte-for-byte PAR1 footer;
-2. a synthetic current-format `OffsetIndex` for every column chunk plus the resulting footer
-   locator fields;
-3. the current modular proposal's column-chunk `placement` module;
-4. the complete current modular footer;
-5. page-first placement, comprising the DBP region map, bit-packed column directory, and adaptive
-   bit-packed/DBP per-page arrays;
-   and
-6. the complete page-first modular footer with schema, page metadata, converted row-range
-   statistics with adaptive start rows and stats-local sparsity, file metadata, and root.
+1. **Thrift footer:** literal `FileMetaData`, including page-index pointers but not their blobs;
+2. **Thrift full:** the Thrift footer plus external Offset Index and Column Index blobs;
+3. **modular core:** framing, file metadata, schema, and placement;
+4. **modular core + stats:** core plus row-group or row-range statistics; and
+5. **modular full:** all applicable page placement and page statistics.
 
-`--full-file` preserves the original data prefix and replaces the PAR1 footer with the experimental
-metadata and a `[region map location][root location][PMF1]` trailer. Without it, the converter emits
-only the metadata bytes and trailer for size analysis.
+The page-index blobs are stored outside the Thrift footer and addressed by its column-chunk
+metadata. Adding their serialized lengths to the footer length measures their total metadata cost;
+it does not generally assume one physically contiguous byte range. In these four parquet-java
+files, all index ranges are non-overlapping and collectively form one contiguous span ending
+exactly where the Thrift footer begins, so the sum also equals the physical index span.
 
-Current page-first results:
+All modular statistics use a 16-byte min/max suffix limit. Each tier is serialized independently,
+so its directory, region map, root, and framing reflect only its included modules. Fixed
+magic/length trailers are excluded consistently.
 
-The machine-readable output is in `page-footer-size.csv`.
+| Dataset | Thrift footer | Thrift full |
+| --- | ---: | ---: |
+| US Accidents | 14,079 B | 112,106 B |
+| FineWeb | 26,693 B | 159,589 B |
+| Hacker News | 6,380 B | 145,910 B |
+| Yellow Taxi | 5,183 B | 116,247 B |
 
-| dataset | chunks (count) | data pages (count) | dictionary pages (count) | total pages (count) | current footer (bytes) | current + offset indexes (bytes) | column-chunk placement (bytes) | page placement (bytes) | placement change | complete column-chunk footer (bytes) | complete page footer (bytes) | complete change |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| US Accidents | 50,830 | 50,830 | 36,465 | 87,295 | 4,747,144 | 5,872,211 | 694,618 | 277,795 | −60.0% | 1,764,414 | 892,344 | −49.4% |
-| FineWeb 10BT | 9,441 | 9,441 | 9,441 | 18,882 | 3,971,883 | 4,187,395 | 158,380 | 63,643 | −59.8% | 530,722 | 337,076 | −36.5% |
-| Hacker News | 15,022 | 15,022 | 12,876 | 27,898 | 1,840,138 | 2,177,310 | 223,029 | 115,141 | −48.4% | 598,045 | 356,204 | −40.4% |
-| Yellow Taxi | 80 | 145 | 80 | 225 | 11,212 | 13,868 | 1,404 | 3,289 | +134.3% | 5,877 | 7,461 | +27.0% |
+| Dataset | Current modular core | Core + RG stats | vs Thrift footer | Current modular full | vs Thrift full |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| US Accidents | 8,919 B | 12,229 B | −13.1% | 82,490 B | −26.4% |
+| FineWeb | 2,826 B | 6,653 B | −75.1% | 69,860 B | −56.2% |
+| Hacker News | 3,317 B | 4,736 B | −25.8% | 38,058 B | −73.9% |
+| Yellow Taxi | 2,942 B | 4,352 B | −16.0% | 98,573 B | −15.2% |
 
-Row-range statistics account for the following bytes, including the per-column locator array:
+| Dataset | PAR1 addendum core | Core + RG stats | vs Thrift footer | PAR1 addendum full | vs Thrift full |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| US Accidents | 26,311 B | 29,626 B | +110.4% | 70,224 B | −37.4% |
+| FineWeb | 29,205 B | 33,021 B | +23.7% | 58,043 B | −63.6% |
+| Hacker News | 12,632 B | 14,088 B | +120.8% | 34,185 B | −76.6% |
+| Yellow Taxi | 18,391 B | 19,791 B | +281.8% | 75,225 B | −35.3% |
 
-| dataset | current modular row-group statistics (bytes) | page-first row-range statistics (bytes) | change |
-|---|---:|---:|---:|
-| US Accidents | 1,059,755 | 604,393 | −43.0% |
-| FineWeb 10BT | 371,353 | 272,436 | −26.6% |
-| Hacker News | 371,678 | 237,702 | −36.0% |
-| Yellow Taxi | 2,265 | 1,921 | −15.2% |
+PAR1 core already contains page-level placement, so its comparison with the chunk-oriented Thrift
+footer exposes the cost of that richer placement. PAR1 full adds flat Column Index only; page
+placement has already subsumed Offset Index.
 
-Column-chunk placement is the current modular proposal's serialized `placement` module alone; its
-complete footer includes all modules emitted by Jiayi's converter. Page placement comprises the
-DBP region map, bit-packed page directory, one dictionary-encoding boolean, and six self-counting
-per-column arrays that independently choose bit-packing or DBP.
-Dictionary pages still have region
-boundaries, but are represented logically only by direct references from data pages.
-Physical types remain in the shared schema and `num_rows` remains in the shared root, so neither
-whole structure is charged to page placement. The complete page footer additionally includes
-schema, converted row-range statistics, file metadata, and the root. Current + offset indexes
-includes both serialized Thrift `OffsetIndex` blobs and the footer growth from adding their
-per-chunk locators.
+| Dataset | PAR3 core | Core + row-range stats | PAR3 full | vs Thrift full |
+| --- | ---: | ---: | ---: | ---: |
+| US Accidents | 26,286 B | 61,586 B | 61,586 B | −45.1% |
+| FineWeb | 29,071 B | 52,466 B | 52,466 B | −67.1% |
+| Hacker News | 12,561 B | 32,148 B | 32,148 B | −78.0% |
+| Yellow Taxi | 18,366 B | 61,647 B | 61,647 B | −47.0% |
 
-On the three large files, complete page-first footers are 37% to 49% smaller than current modular.
-Yellow Taxi has only a few pages per column; choosing bit-packing for short arrays cuts its
-page-placement overhead substantially, although its complete page-first footer remains 27% larger.
+PAR3 core + stats and full are identical: page placement subsumes Offset Index and page-granular
+row-range statistics subsume Column Index. This tier is therefore compared with Thrift full.
 
-Both prefix-based representations cap each min/max suffix at the configured limit (16 bytes in the
-table), so their statistics policies are directly comparable.
+The machine-readable output is in `page-first-split-size.csv`. `--full-file` preserves the data
+prefix and emits `PMA1` or `PMF3`; the default writes metadata only for size analysis.
 
 ## Component breakdown
 

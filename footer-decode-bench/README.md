@@ -39,12 +39,12 @@ numbers reflect decode work, not the allocator.
 | `walk` | today's nested footer: visit every column chunk, decode the projected ones. | O(all chunks) |
 | `index` | jump table: seek straight to each projected chunk. | O(projected) |
 | `modular` | `ModularFooter`: column-major bit-packed placement + a separate `ColumnStatistics` module. | O(projected) |
-| `page_cold` | page-first footer: decode the mandatory DBP region offsets, then decode projected columns' adaptive page arrays. | O(all regions + projected pages) |
-| `page_warm` | page-first footer with the region map retained; projected columns' adaptive page arrays are decoded sequentially. | O(projected pages) |
+| `par1_addendum` | decode mandatory region/row-group DBP streams and projected page arrays; optionally decode row-group stats and flat Column Index. | O(all regions + projected pages) |
+| `par3_full` | decode the mandatory region DBP stream and projected page arrays; optionally decode row-range statistics. | O(all regions + projected pages) |
 
-Files: `footer_decode_bench.cc` (driver), `footer_formats.h` (the six resolvers),
-`plot_sweep.py`, `run_corpus.py`. Placement-only runs cross-check every resolver against the current
-footer before timing. Page-first statistics decoding is not part of this benchmark.
+Files: `footer_decode_bench.cc` (driver), `footer_formats.h` (the resolvers),
+`plot_sweep.py`, and `run_page_first_split.py`. Placement-only runs cross-check every resolver
+against the current footer before timing.
 
 ```sh
 cd /path/to/parquet-footer-bench
@@ -53,11 +53,13 @@ cmake --build build -j --target jumptable_footer_convert modular_footer_convert 
 ../build/jumptable_footer_convert input.parquet input.jt.parquet
 ../build/modular_footer_convert   input.parquet input.modular
 python3 ../modular-footer/parquet_to_page_modular.py \
-  --truncate-minmax 0 input.parquet input.page-modular
+  --format addendum --truncate-minmax 16 input.parquet input.addendum
+python3 ../modular-footer/parquet_to_page_modular.py \
+  --format full --truncate-minmax 16 input.parquet input.full
 ../build/footer_decode_bench input.jt.parquet 1 --placement-only \
-  input.modular input.page-modular
+  input.modular input.addendum input.full
 ../build/footer_decode_bench input.jt.parquet --sweep --placement-only \
-  input.modular input.page-modular | \
+  input.modular input.addendum input.full | \
   python3 plot_sweep.py "hits: 105 cols x 226 rg" > results/projection_sweep.svg
 ```
 
@@ -70,7 +72,8 @@ Thrift parsing, and allocation.
 
 ```sh
 cmake --build build -j --target dbp_throughput
-build/dbp_throughput input.page-modular
+build/dbp_throughput input.addendum
+build/dbp_throughput input.full
 ```
 
 Across the five measured maps, median throughput over three runs is 1.61-1.65 billion offsets/s,
@@ -120,32 +123,37 @@ modular            33.028       3372.619          93.0x
 - Narrow footers (e.g. yellow_tripdata, 19 columns) sit within a few µs/op across all lean
   readers — fixed overhead dominates, so they are not where decoding matters.
 
-Corpus sweeps ([`run_corpus.py`](run_corpus.py), from `real-footer-size/corpus.json`):
-[projection_sweep](results/projection_sweep.svg) (hits) ·
-[us-accidents](results/us-accidents-00004-of-00007-placement.svg) ·
-[fineweb](results/fineweb-10bt-000-placement.svg) ·
-[hacker-news](results/hacker-news-00000-of-00039-placement.svg) ·
-[yellow-taxi](results/yellow-tripdata-2025-01-placement.svg).
-Checked-in numbers are one machine's — read them as trends, not absolute latency.
+The split benchmark uses files emitted by Raincloud's actual parquet-java target. Run it with:
 
-One projected column on the Raincloud corpus, in microseconds per operation:
+```sh
+python3 footer-decode-bench/run_page_first_split.py
+```
 
-| dataset | current Thrift (µs/op) | current modular (µs/op) | page cold (µs/op) | page retained (µs/op) |
-|---|---:|---:|---:|---:|
-| US Accidents | 77,139.652 | 28.500 | 115.041 | 11.633 |
-| FineWeb 10BT | 11,711.905 | 26.519 | 25.176 | 11.408 |
-| Hacker News | 18,720.695 | 27.143 | 43.727 | 11.223 |
-| Yellow Taxi | 101.450 | 0.128 | 0.514 | 0.220 |
+One projected column, placement only:
 
-Statistics are intentionally excluded to isolate placement decode. `page cold` decodes every DBP
-region offset; `page retained` reuses the resulting absolute offsets.
-The page-first resolver uses legacy row-group boundaries only to construct the same benchmark
-result as the current layouts; they are not part of page-first metadata. Codec DBP decoding, page
-headers, and file I/O are also outside this workload.
+| Dataset | Thrift full | Current modular full | PAR1 addendum full | PAR3 full |
+| --- | ---: | ---: | ---: | ---: |
+| US Accidents | 70.870 µs/op | 0.803 µs/op | 3.656 µs/op | 3.438 µs/op |
+| FineWeb | 563.561 µs/op | 43.540 µs/op | 27.122 µs/op | 27.345 µs/op |
+| Hacker News | 51.653 µs/op | 0.806 µs/op | 2.224 µs/op | 2.249 µs/op |
+| Yellow Taxi | 53.315 µs/op | 2.262 µs/op | 3.986 µs/op | 3.828 µs/op |
 
-`Current Thrift + OffsetIndex` is not a separate resolver in this chunk-shaped workload. The index
-is stored outside the footer and does not avoid parsing current Thrift metadata; it is retained as a
-size comparison for the page-level placement information it adds.
+One projected column, placement plus statistics:
+
+| Dataset | Thrift full | Current modular full | PAR1 addendum full | PAR3 full |
+| --- | ---: | ---: | ---: | ---: |
+| US Accidents | 82.465 µs/op | 2.896 µs/op | 4.897 µs/op | 4.987 µs/op |
+| FineWeb | 515.162 µs/op | 37.164 µs/op | 25.739 µs/op | 25.419 µs/op |
+| Hacker News | 55.464 µs/op | 2.463 µs/op | 2.999 µs/op | 2.569 µs/op |
+| Yellow Taxi | 65.205 µs/op | 6.784 µs/op | 5.692 µs/op | 5.274 µs/op |
+
+Placement-only decodes projected Offset Index for current Thrift/current modular and projected page
+placement for page-first. The second workload also decodes projected Column Index; current modular
+and PAR1 decode row-group statistics, while PAR3 decodes row-range statistics. FineWeb's first
+column has no page statistics, so its one-column statistics timing is nearly its placement timing.
+Every checked-in `*-split-{placement,statistics}.csv` contains projection sweeps through all
+columns. Files are already in memory and each operation is calibrated to roughly 200 ms; interpret
+the absolute latency as machine-specific.
 
 ## 2. Name-resolve bench
 

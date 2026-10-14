@@ -67,6 +67,8 @@ class Reader:
             element_type = header & 0x0f
             if size == 15:
                 size = self.varint()
+            if element_type in (BOOL_TRUE, BOOL_FALSE):
+                return element_type, [self.byte() == BOOL_TRUE for unused in range(size)]
             return element_type, [self.value(element_type) for unused in range(size)]
         if value_type == MAP:
             size = self.varint()

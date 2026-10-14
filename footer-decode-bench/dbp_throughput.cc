@@ -42,9 +42,12 @@ std::string ReadWhole(const std::string &path) {
 
 fdb::ArrayPage ReadRegionOffsets(const std::string &file) {
   constexpr size_t kTrailerSize = 36;
-  if (file.size() < kTrailerSize ||
-      std::memcmp(file.data() + file.size() - 4, "PMF1", 4) != 0)
-    throw std::runtime_error("page footer missing PMF1 trailer");
+  if (file.size() < kTrailerSize)
+    throw std::runtime_error("page footer is shorter than its trailer");
+  const char *magic = file.data() + file.size() - 4;
+  if (std::memcmp(magic, "PMA1", 4) != 0 &&
+      std::memcmp(magic, "PMF3", 4) != 0 && std::memcmp(magic, "PMF1", 4) != 0)
+    throw std::runtime_error("page footer has an unknown trailer");
 
   int64_t map_length = 0;
   int64_t root_length = 0;
@@ -54,7 +57,7 @@ fdb::ArrayPage ReadRegionOffsets(const std::string &file) {
   if (map_length <= 0 || root_length <= 0 ||
       static_cast<uint64_t>(map_length + root_length) >
           file.size() - kTrailerSize)
-    throw std::runtime_error("invalid PMF1 trailer lengths");
+    throw std::runtime_error("invalid page-footer trailer lengths");
 
   size_t map_position = file.size() - kTrailerSize -
                         static_cast<size_t>(root_length + map_length);

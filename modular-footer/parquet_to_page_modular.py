@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a complete PAR1 file to the experimental page-first modular footer."""
+"""Convert a PAR1 file to the PAR1-addendum or PAR3-full page-first footer."""
 
 import argparse
 import bisect
@@ -23,6 +23,12 @@ K_SCHEMA = 0
 K_PAGE_DIRECTORY = 1
 K_ROW_RANGE_STATISTICS = 2
 K_FILE_METADATA = 3
+
+ADD_K_SCHEMA = 0
+ADD_K_PAGE_DIRECTORY = 1
+ADD_K_ROW_GROUP_STATISTICS = 2
+ADD_K_FLAT_COLUMN_INDEX = 3
+ADD_K_FILE_METADATA = 4
 
 DATA_PAGE = 0
 DICTIONARY_PAGE = 2
@@ -135,6 +141,69 @@ def encoded_field(field_id, array):
     return [field_id, compact.STRUCT, array]
 
 
+def modular_dense_int_array(values):
+    return [
+        [1, compact.I32, len(values)],
+        [2, compact.BINARY, dense_values(values)],
+    ]
+
+
+def modular_sparse_int_array(domain, positions, values):
+    position_width = bit_width(positions)
+    presence = uleb(len(positions)) + bytes([position_width]) + pack_bits(
+        positions, position_width
+    )
+    return [
+        [1, compact.I32, domain],
+        [2, compact.BINARY, dense_values(values)],
+        [3, compact.I32, 1],
+        [4, compact.BINARY, presence],
+    ]
+
+
+def modular_sparse_bytes_array(domain, positions, values):
+    position_width = bit_width(positions)
+    presence = uleb(len(positions)) + bytes([position_width]) + pack_bits(
+        positions, position_width
+    )
+    offsets = [0]
+    data = bytearray()
+    for value in values:
+        data.extend(value)
+        offsets.append(len(data))
+    encoded_values = dense_values(offsets) + bytes(data)
+    return [
+        [1, compact.I32, domain],
+        [2, compact.BINARY, encoded_values],
+        [3, compact.I32, 1],
+        [4, compact.BINARY, presence],
+    ]
+
+
+def modular_int_array(domain, positions, values):
+    if positions == list(range(domain)):
+        return modular_dense_int_array(values)
+    return modular_sparse_int_array(domain, positions, values)
+
+
+def modular_dense_bytes_array(values):
+    offsets = [0]
+    data = bytearray()
+    for value in values:
+        data.extend(value)
+        offsets.append(len(data))
+    return [
+        [1, compact.I32, len(values)],
+        [2, compact.BINARY, dense_values(offsets) + bytes(data)],
+    ]
+
+
+def modular_bytes_array(domain, positions, values):
+    if positions == list(range(domain)):
+        return modular_dense_bytes_array(values)
+    return modular_sparse_bytes_array(domain, positions, values)
+
+
 def read_footer(path):
     file_size = path.stat().st_size
     with path.open("rb") as stream:
@@ -233,6 +302,12 @@ class Chunk:
             metadata, 9, compact.I64, "ColumnMetaData.data_page_offset"
         )
         self.dictionary_offset = optional_int(metadata, 11)
+        self.offset_index_offset = optional_int(thrift, 4)
+        self.offset_index_length = optional_int(thrift, 5)
+        self.column_index_offset = optional_int(thrift, 6)
+        self.column_index_length = optional_int(thrift, 7)
+        self.offset_index = None
+        self.column_index = None
         self.pages = []
 
 
@@ -476,6 +551,50 @@ def v1_page_rows(
     return sum(level == 0 for level in levels), levels[0] != 0
 
 
+def read_thrift_range(stream, offset, length, name):
+    if offset is None or length is None or length <= 0:
+        return None
+    stream.seek(offset)
+    blob = stream.read(length)
+    if len(blob) != length:
+        raise ValueError("{} is truncated".format(name))
+    return compact.decode(blob)
+
+
+def parse_offset_index(fields):
+    locations = required(fields, 1, compact.LIST, "OffsetIndex.page_locations")
+    if locations[0] != compact.STRUCT:
+        raise ValueError("OffsetIndex.page_locations has the wrong element type")
+    return [
+        {
+            "offset": required(location, 1, compact.I64, "PageLocation.offset"),
+            "size": required(location, 2, compact.I32, "PageLocation.compressed_page_size"),
+            "first_row": required(location, 3, compact.I64, "PageLocation.first_row_index"),
+        }
+        for location in locations[1]
+    ]
+
+
+def parse_column_index(fields):
+    null_pages = required(fields, 1, compact.LIST, "ColumnIndex.null_pages")[1]
+    minimums = required(fields, 2, compact.LIST, "ColumnIndex.min_values")[1]
+    maximums = required(fields, 3, compact.LIST, "ColumnIndex.max_values")[1]
+    boundary_order = required(fields, 4, compact.I32, "ColumnIndex.boundary_order")
+    if len(null_pages) != len(minimums) or len(null_pages) != len(maximums):
+        raise ValueError("ColumnIndex arrays have different lengths")
+    null_counts_field = field(fields, 5)
+    null_counts = None if null_counts_field is None else null_counts_field[2][1]
+    if null_counts is not None and len(null_counts) != len(null_pages):
+        raise ValueError("ColumnIndex.null_counts has the wrong length")
+    return {
+        "null_pages": [bool(value) for value in null_pages],
+        "minimums": minimums,
+        "maximums": maximums,
+        "boundary_order": boundary_order,
+        "null_counts": null_counts,
+    }
+
+
 def scan_pages(path, footer):
     groups = row_groups(footer)
     if not groups:
@@ -497,12 +616,31 @@ def scan_pages(path, footer):
                 metadata = column_metadata(thrift_chunk)
                 chunk = Chunk(column, group_ordinal, thrift_chunk, metadata)
                 chunks[group_ordinal][column] = chunk
+                offset_index_fields = read_thrift_range(
+                    stream,
+                    chunk.offset_index_offset,
+                    chunk.offset_index_length,
+                    "OffsetIndex",
+                )
+                if offset_index_fields is not None:
+                    chunk.offset_index = parse_offset_index(offset_index_fields)
+                column_index_fields = read_thrift_range(
+                    stream,
+                    chunk.column_index_offset,
+                    chunk.column_index_length,
+                    "ColumnIndex",
+                )
+                if column_index_fields is not None:
+                    chunk.column_index = parse_column_index(column_index_fields)
+                    if chunk.offset_index is None:
+                        raise ValueError("ColumnIndex is present without OffsetIndex")
                 start = chunk.data_offset
                 if chunk.dictionary_offset is not None:
                     start = min(start, chunk.dictionary_offset)
                 end = start + chunk.total_compressed
                 offset = start
                 first_row = 0
+                data_page_ordinal = 0
                 while offset < end:
                     header, header_size = read_page_header(stream, offset, end - offset)
                     (
@@ -520,7 +658,20 @@ def scan_pages(path, footer):
                             "page at {} exceeds chunk [{}, {})".format(offset, start, end)
                         )
                     starts_with_continuation = False
-                    if page_type == DATA_PAGE and max_repetition_levels[column] > 0:
+                    if page_type in (DATA_PAGE, DATA_PAGE_V2) and chunk.offset_index is not None:
+                        if data_page_ordinal >= len(chunk.offset_index):
+                            raise ValueError("OffsetIndex has too few page locations")
+                        location = chunk.offset_index[data_page_ordinal]
+                        if location["offset"] != offset or location["size"] != size:
+                            raise ValueError("OffsetIndex placement disagrees with scanned page")
+                        first_row = location["first_row"]
+                        next_first_row = (
+                            chunk.offset_index[data_page_ordinal + 1]["first_row"]
+                            if data_page_ordinal + 1 < len(chunk.offset_index)
+                            else group_rows
+                        )
+                        num_rows = next_first_row - first_row
+                    elif page_type == DATA_PAGE and max_repetition_levels[column] > 0:
                         if repetition_encoding != 3:
                             raise ValueError(
                                 "nested V1 page uses unsupported repetition-level encoding "
@@ -551,6 +702,7 @@ def scan_pages(path, footer):
                         if num_rows is None:
                             num_rows = num_values
                         first_row += num_rows
+                        data_page_ordinal += 1
                     offset += size
                 if offset != end:
                     raise ValueError("column chunk scan did not end at its declared size")
@@ -560,6 +712,13 @@ def scan_pages(path, footer):
                             first_row, group_rows, column, group_ordinal
                         )
                     )
+                if chunk.offset_index is not None and data_page_ordinal != len(chunk.offset_index):
+                    raise ValueError("OffsetIndex page count disagrees with scanned pages")
+                if (
+                    chunk.column_index is not None
+                    and len(chunk.column_index["null_pages"]) != data_page_ordinal
+                ):
+                    raise ValueError("ColumnIndex page count disagrees with scanned pages")
             row_base += group_rows
     return chunks, pages
 
@@ -612,8 +771,188 @@ def statistic(metadata):
     }
 
 
-def build_statistics_descriptor(column_chunks, range_start_rows, suffix_limit):
-    if len(column_chunks) != len(range_start_rows):
+def column_index_stat(column_index, page):
+    all_null = column_index["null_pages"][page]
+    null_counts = column_index["null_counts"]
+    return {
+        "null": None if null_counts is None else null_counts[page],
+        "nan": None,
+        "min": None if all_null else column_index["minimums"][page],
+        "max": None if all_null else column_index["maximums"][page],
+        "min_exact": True,
+        "max_exact": True,
+    }
+
+
+def build_modular_column_statistics(column_chunks, suffix_limit):
+    domain = len(column_chunks)
+    null_positions = []
+    null_values = []
+    minmax_positions = []
+    prefixes = []
+    min_suffixes = []
+    max_suffixes = []
+    min_exact = []
+    max_exact = []
+    for position, chunk in enumerate(column_chunks):
+        stats = statistic(chunk.metadata)
+        if stats is None:
+            continue
+        if stats["null"] is not None:
+            null_positions.append(position)
+            null_values.append(stats["null"])
+        if stats["min"] is None or stats["max"] is None:
+            continue
+        prefix = common_prefix(stats["min"], stats["max"])
+        minimum, maximum, min_was_exact, max_was_exact = truncate_bounds(
+            stats["min"][len(prefix):],
+            stats["max"][len(prefix):],
+            suffix_limit,
+        )
+        minmax_positions.append(position)
+        prefixes.append(prefix)
+        min_suffixes.append(minimum)
+        max_suffixes.append(maximum)
+        min_exact.append(int(stats["min_exact"] and min_was_exact))
+        max_exact.append(int(stats["max_exact"] and max_was_exact))
+    if not null_positions and not minmax_positions:
+        return b""
+    fields = []
+    if null_positions:
+        fields.append(encoded_field(
+            1,
+            modular_sparse_int_array(domain, null_positions, null_values),
+        ))
+    if minmax_positions:
+        fields.extend([
+            encoded_field(
+                2,
+                modular_sparse_bytes_array(domain, minmax_positions, prefixes),
+            ),
+            encoded_field(
+                3,
+                modular_sparse_bytes_array(domain, minmax_positions, min_suffixes),
+            ),
+            encoded_field(
+                4,
+                modular_sparse_bytes_array(domain, minmax_positions, max_suffixes),
+            ),
+        ])
+        if not all(min_exact) or not all(max_exact):
+            fields.extend([
+                encoded_field(
+                    5,
+                    modular_sparse_int_array(domain, minmax_positions, min_exact),
+                ),
+                encoded_field(
+                    6,
+                    modular_sparse_int_array(domain, minmax_positions, max_exact),
+                ),
+            ])
+    return compact.encode(fields)
+
+
+def build_flat_column_index(column_chunks, suffix_limit):
+    page_domain = sum(
+        sum(page.page_type in (DATA_PAGE, DATA_PAGE_V2) for page in chunk.pages)
+        for chunk in column_chunks
+    )
+    boundary_positions = []
+    boundary_values = []
+    page_positions = []
+    null_pages = []
+    null_count_positions = []
+    null_counts = []
+    minmax_positions = []
+    prefixes = []
+    min_suffixes = []
+    max_suffixes = []
+    min_exact = []
+    max_exact = []
+    page_base = 0
+    for group, chunk in enumerate(column_chunks):
+        page_count = sum(
+            page.page_type in (DATA_PAGE, DATA_PAGE_V2) for page in chunk.pages
+        )
+        column_index = chunk.column_index
+        if column_index is not None:
+            boundary_positions.append(group)
+            boundary_values.append(column_index["boundary_order"])
+            for page in range(page_count):
+                position = page_base + page
+                page_positions.append(position)
+                all_null = column_index["null_pages"][page]
+                null_pages.append(int(all_null))
+                if column_index["null_counts"] is not None:
+                    null_count_positions.append(position)
+                    null_counts.append(column_index["null_counts"][page])
+                if all_null:
+                    continue
+                minimum = column_index["minimums"][page]
+                maximum = column_index["maximums"][page]
+                prefix = common_prefix(minimum, maximum)
+                minimum, maximum, min_was_exact, max_was_exact = truncate_bounds(
+                    minimum[len(prefix):], maximum[len(prefix):], suffix_limit
+                )
+                minmax_positions.append(position)
+                prefixes.append(prefix)
+                min_suffixes.append(minimum)
+                max_suffixes.append(maximum)
+                min_exact.append(int(min_was_exact))
+                max_exact.append(int(max_was_exact))
+        page_base += page_count
+    if not boundary_positions:
+        return b""
+    fields = [
+        encoded_field(
+            1,
+            modular_int_array(
+                len(column_chunks), boundary_positions, boundary_values
+            ),
+        ),
+        encoded_field(
+            2,
+            modular_int_array(page_domain, page_positions, null_pages),
+        ),
+    ]
+    if null_count_positions:
+        fields.append(encoded_field(
+            3,
+            modular_int_array(
+                page_domain, null_count_positions, null_counts
+            ),
+        ))
+    if minmax_positions:
+        fields.extend([
+            encoded_field(
+                4,
+                modular_bytes_array(page_domain, minmax_positions, prefixes),
+            ),
+            encoded_field(
+                5,
+                modular_bytes_array(page_domain, minmax_positions, min_suffixes),
+            ),
+            encoded_field(
+                6,
+                modular_bytes_array(page_domain, minmax_positions, max_suffixes),
+            ),
+        ])
+        if not all(min_exact) or not all(max_exact):
+            fields.extend([
+                encoded_field(
+                    7,
+                    modular_sparse_int_array(page_domain, minmax_positions, min_exact),
+                ),
+                encoded_field(
+                    8,
+                    modular_sparse_int_array(page_domain, minmax_positions, max_exact),
+                ),
+            ])
+    return compact.encode(fields)
+
+
+def build_row_range_statistics_descriptor(statistics, range_start_rows, suffix_limit):
+    if len(statistics) != len(range_start_rows):
         raise ValueError("statistics ranges do not match column chunks")
     if not range_start_rows or range_start_rows[0] != 0 or any(
         current <= previous
@@ -630,8 +969,7 @@ def build_statistics_descriptor(column_chunks, range_start_rows, suffix_limit):
     max_suffixes = []
     min_exact = []
     max_exact = []
-    for position, chunk in enumerate(column_chunks):
-        stats = statistic(chunk.metadata)
+    for position, stats in enumerate(statistics):
         if stats is None:
             return b""
         has_minmax = stats["min"] is not None and stats["max"] is not None
@@ -691,6 +1029,48 @@ def build_statistics_descriptor(column_chunks, range_start_rows, suffix_limit):
                 9, compact.BINARY, pack_bits(exactness, 1),
             ])
     return compact.encode(fields)
+
+
+def build_statistics_descriptor(column_chunks, range_start_rows, suffix_limit):
+    return build_row_range_statistics_descriptor(
+        [statistic(chunk.metadata) for chunk in column_chunks],
+        range_start_rows,
+        suffix_limit,
+    )
+
+
+def build_full_column_statistics(column_chunks, row_group_starts, suffix_limit):
+    statistics = []
+    range_starts = []
+    boundary_orders = []
+    for chunk, group_start in zip(column_chunks, row_group_starts):
+        data_pages = [
+            page for page in chunk.pages
+            if page.page_type in (DATA_PAGE, DATA_PAGE_V2)
+        ]
+        if chunk.column_index is None:
+            stats = statistic(chunk.metadata)
+            if stats is None:
+                return b"", 0
+            range_starts.append(group_start)
+            statistics.append(stats)
+            boundary_orders.append(0)
+            continue
+        boundary_orders.append(chunk.column_index["boundary_order"])
+        for page, data_page in enumerate(data_pages):
+            range_starts.append(data_page.first_row)
+            statistics.append(column_index_stat(chunk.column_index, page))
+    if not range_starts or range_starts[0] != 0:
+        raise ValueError("row-range statistics do not start at row zero")
+    if any(current <= previous for previous, current in zip(range_starts, range_starts[1:])):
+        raise ValueError("page-level row-range statistics do not strictly increase")
+    descriptor = build_row_range_statistics_descriptor(
+        statistics, range_starts, suffix_limit
+    )
+    if not descriptor:
+        return b"", 0
+    boundary_order = boundary_orders[0] if len(boundary_orders) == 1 else 0
+    return descriptor, boundary_order
 
 
 def build_legacy_offset_index(chunk):
@@ -771,6 +1151,32 @@ def initial_region_offsets(pages, footer_start):
     return ordered
 
 
+def build_row_group_region_ordinals(chunks, offsets, footer_start):
+    end_border = bisect.bisect_left(offsets, footer_start)
+    if end_border == len(offsets) or offsets[end_border] != footer_start:
+        raise ValueError("footer start is not a region boundary")
+    borders = [None] * len(chunks)
+    for group_ordinal, group_chunks in enumerate(chunks):
+        pages = [page for chunk in group_chunks for page in chunk.pages]
+        if pages:
+            borders[group_ordinal] = min(page.region for page in pages)
+    next_border = end_border
+    for group_ordinal in range(len(borders) - 1, -1, -1):
+        border = borders[group_ordinal]
+        if border is None:
+            borders[group_ordinal] = next_border
+        elif border > next_border:
+            raise ValueError("row-group pages are not in physical row-group order")
+        next_border = borders[group_ordinal]
+    borders.append(end_border)
+    for group_ordinal, group_chunks in enumerate(chunks):
+        for chunk in group_chunks:
+            for page in chunk.pages:
+                if not borders[group_ordinal] <= page.region < borders[group_ordinal + 1]:
+                    raise ValueError("row-group pages do not form contiguous physical spans")
+    return borders
+
+
 def thrift_schema_module(footer):
     schema = required(footer, 2, compact.LIST, "FileMetaData.schema")
     fields = [[1, compact.LIST, schema]]
@@ -791,18 +1197,32 @@ def thrift_file_metadata_module(footer):
     return b"" if not fields else compact.encode(fields)
 
 
-def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
+def build_page_footer(
+    path, footer, footer_start, chunks, pages, suffix_limit, footer_format, tier
+):
+    if footer_format not in ("addendum", "full"):
+        raise ValueError("unknown page-first footer format {}".format(footer_format))
+    if tier not in ("core", "stats", "full"):
+        raise ValueError("unknown metadata tier {}".format(tier))
     groups = row_groups(footer)
     num_columns = len(chunks[0])
     offsets = initial_region_offsets(pages, footer_start)
     region_by_offset = {offset: index for index, offset in enumerate(offsets[:-1])}
     for page in pages:
         page.region = region_by_offset[page.offset]
+    row_group_ordinals = build_row_group_region_ordinals(
+        chunks, offsets, footer_start
+    )
+    row_group_num_rows = [
+        required(group, 3, compact.I64, "RowGroup.num_rows") for group in groups
+    ]
     layout = Layout(footer_start, offsets)
     modules = []
     page_descriptor_bytes = 0
     stats_descriptor_bytes = 0
     stats_directory_bytes = 0
+    column_index_descriptor_bytes = 0
+    column_index_directory_bytes = 0
 
     column_pages = [[] for unused in range(num_columns)]
     for group_chunks in chunks:
@@ -862,25 +1282,34 @@ def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
     page_directory_region = layout.add("page_directory", page_directory)
     modules.append((K_PAGE_DIRECTORY, page_directory_region))
 
-    stats_regions = []
     stats_positions = []
     stats_values = []
+    boundary_orders = []
     row_start = 0
     range_starts = []
     for group in groups:
         num_rows = required(group, 3, compact.I64, "RowGroup.num_rows")
         range_starts.append(row_start)
         row_start += num_rows
-    for column in range(num_columns):
-        descriptor = build_statistics_descriptor(
-            [group_chunks[column] for group_chunks in chunks],
-            range_starts,
-            suffix_limit,
-        )
-        if descriptor:
+    if tier != "core":
+        for column in range(num_columns):
+            column_chunks = [group_chunks[column] for group_chunks in chunks]
+            if footer_format == "addendum":
+                descriptor = build_modular_column_statistics(
+                    column_chunks, suffix_limit
+                )
+                boundary_order = None
+            else:
+                descriptor, boundary_order = build_full_column_statistics(
+                    column_chunks, range_starts, suffix_limit
+                )
+            if not descriptor:
+                continue
             region = layout.add("statistics_{}".format(column), descriptor)
             stats_positions.append(column)
             stats_values.append(region)
+            if boundary_order is not None:
+                boundary_orders.append(boundary_order)
             stats_descriptor_bytes += len(descriptor)
     if stats_positions:
         stats_directory_fields = []
@@ -891,15 +1320,61 @@ def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
         stats_directory_fields.append([
             2, compact.BINARY, dense_values(stats_values),
         ])
+        if footer_format == "full":
+            stats_directory_fields.append([
+                3,
+                compact.BINARY,
+                bytes([2]) + pack_bits(boundary_orders, 2),
+            ])
         stats_directory = compact.encode(stats_directory_fields)
         stats_directory_bytes = len(stats_directory)
-        stats_directory_region = layout.add("row_range_statistics", stats_directory)
-        modules.append((K_ROW_RANGE_STATISTICS, stats_directory_region))
+        stats_name = (
+            "row_group_statistics"
+            if footer_format == "addendum"
+            else "row_range_statistics"
+        )
+        stats_directory_region = layout.add(stats_name, stats_directory)
+        modules.append((
+            ADD_K_ROW_GROUP_STATISTICS
+            if footer_format == "addendum"
+            else K_ROW_RANGE_STATISTICS,
+            stats_directory_region,
+        ))
+
+    column_index_positions = []
+    column_index_values = []
+    if footer_format == "addendum" and tier == "full":
+        for column in range(num_columns):
+            descriptor = build_flat_column_index(
+                [group_chunks[column] for group_chunks in chunks], suffix_limit
+            )
+            if not descriptor:
+                continue
+            region = layout.add("column_index_{}".format(column), descriptor)
+            column_index_positions.append(column)
+            column_index_values.append(region)
+            column_index_descriptor_bytes += len(descriptor)
+        if column_index_positions:
+            fields = []
+            if len(column_index_positions) != num_columns:
+                fields.append([
+                    1,
+                    compact.BINARY,
+                    presence_bitmap(num_columns, column_index_positions),
+                ])
+            fields.append([2, compact.BINARY, dense_values(column_index_values)])
+            directory = compact.encode(fields)
+            column_index_directory_bytes = len(directory)
+            region = layout.add("flat_column_index", directory)
+            modules.append((ADD_K_FLAT_COLUMN_INDEX, region))
 
     file_metadata_blob = thrift_file_metadata_module(footer)
     if file_metadata_blob:
         file_metadata_region = layout.add("file_metadata", file_metadata_blob)
-        modules.append((K_FILE_METADATA, file_metadata_region))
+        modules.append((
+            ADD_K_FILE_METADATA if footer_format == "addendum" else K_FILE_METADATA,
+            file_metadata_region,
+        ))
 
     schema_blob = thrift_schema_module(footer)
     schema_region = layout.add("schema", schema_blob)
@@ -907,31 +1382,71 @@ def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
 
     region_map_offset = layout.cursor
     encoded_region_offsets = delta_values(layout.offsets)
-    region_map_blob = compact.encode([
-        [1, compact.BINARY, encoded_region_offsets],
-    ])
+    region_map_fields = [[1, compact.BINARY, encoded_region_offsets]]
+    if footer_format == "addendum":
+        region_map_fields.extend([
+            [2, compact.BINARY, delta_values(row_group_ordinals)],
+            [3, compact.BINARY, delta_values(row_group_num_rows)],
+        ])
+    region_map_blob = compact.encode(region_map_fields)
     root_offset = region_map_offset + len(region_map_blob)
-    root_blob = compact.encode([
-        [1, compact.I32, required(footer, 1, compact.I32, "FileMetaData.version")],
-        [2, compact.I32, num_columns],
-        [3, compact.I64, required(footer, 3, compact.I64, "FileMetaData.num_rows")],
-        [4, compact.LIST, (
-            compact.STRUCT,
+    version = required(footer, 1, compact.I32, "FileMetaData.version")
+    num_rows = required(footer, 3, compact.I64, "FileMetaData.num_rows")
+    if footer_format == "addendum" and (
+        len(row_group_ordinals) != len(groups) + 1
+        or len(row_group_num_rows) != len(groups)
+        or sum(row_group_num_rows) != num_rows
+    ):
+        raise ValueError("PAR1 row-group arrays disagree with FileMetaData")
+    module_list = (
+        compact.STRUCT,
+        [
             [
-                [
-                    [1, compact.I32, kind],
-                    [2, compact.I64, region],
-                ]
-                for kind, region in modules
-            ],
-        )],
-    ])
+                [1, compact.I32, kind],
+                [2, compact.I64, region],
+            ]
+            for kind, region in modules
+        ],
+    )
+    if footer_format == "addendum":
+        root_fields = [
+            [1, compact.I32, version],
+            [2, compact.I32, len(groups)],
+            [3, compact.I32, num_columns],
+            [4, compact.I64, num_rows],
+            [5, compact.LIST, module_list],
+        ]
+    else:
+        root_fields = [
+            [1, compact.I32, version],
+            [2, compact.I32, num_columns],
+            [3, compact.I64, num_rows],
+            [4, compact.LIST, module_list],
+        ]
+    root_blob = compact.encode(root_fields)
     decoded_region_map = compact.decode(region_map_blob)
     decoded_offsets = decode_delta_values(
         required(decoded_region_map, 1, compact.BINARY, "RegionMap.region_offsets")
     )
     if decoded_offsets != layout.offsets:
         raise ValueError("RegionMap round-trip changed an offset")
+    if footer_format == "addendum":
+        decoded_row_group_ordinals = decode_delta_values(required(
+            decoded_region_map,
+            2,
+            compact.BINARY,
+            "RegionMap.row_group_region_ordinals",
+        ))
+        if decoded_row_group_ordinals != row_group_ordinals:
+            raise ValueError("RegionMap round-trip changed a row-group ordinal")
+        decoded_row_counts = decode_delta_values(required(
+            decoded_region_map,
+            3,
+            compact.BINARY,
+            "RegionMap.row_group_num_rows",
+        ))
+        if decoded_row_counts != row_group_num_rows:
+            raise ValueError("RegionMap round-trip changed a row-group row count")
     decoded_root = compact.decode(root_blob)
     if compact.encode(decoded_root) != root_blob:
         raise ValueError("page-first root failed compact-Thrift round-trip")
@@ -939,6 +1454,8 @@ def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
     addressing_bytes = page_descriptor_bytes + len(page_directory) + len(region_map_blob)
     placement_bytes = addressing_bytes
     details = {
+        "footer_format": footer_format,
+        "tier": tier,
         "metadata": metadata,
         "region_map_offset": region_map_offset,
         "region_map_bytes": len(region_map_blob),
@@ -948,7 +1465,26 @@ def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
         "addressing_bytes": addressing_bytes,
         "page_descriptor_bytes": page_descriptor_bytes,
         "stats_descriptor_bytes": stats_descriptor_bytes,
-        "statistics_bytes": stats_descriptor_bytes + stats_directory_bytes,
+        "statistics_bytes": (
+            stats_descriptor_bytes
+            + stats_directory_bytes
+            + column_index_descriptor_bytes
+            + column_index_directory_bytes
+        ),
+        "row_statistics_bytes": stats_descriptor_bytes + stats_directory_bytes,
+        "column_index_bytes": (
+            column_index_descriptor_bytes + column_index_directory_bytes
+        ),
+        "indexed_column_chunks": sum(
+            chunk.column_index is not None
+            for group_chunks in chunks
+            for chunk in group_chunks
+        ),
+        "offset_indexed_column_chunks": sum(
+            chunk.offset_index is not None
+            for group_chunks in chunks
+            for chunk in group_chunks
+        ),
         "module_regions": layout.regions,
         "num_regions": len(layout.offsets) - 1,
     }
@@ -956,13 +1492,14 @@ def build_page_footer(path, footer, footer_start, chunks, pages, suffix_limit):
 
 
 def write_output(path, output, footer_start, details, full_file):
+    magic = b"PMA1" if details["footer_format"] == "addendum" else b"PMF3"
     trailer = struct.pack(
         "<qqqq4s",
         details["region_map_offset"],
         details["region_map_bytes"],
         details["root_offset"],
         details["root_bytes"],
-        b"PMF1",
+        magic,
     )
     with output.open("wb") as destination:
         if full_file:
@@ -983,9 +1520,17 @@ def main():
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path, nargs="?")
     parser.add_argument("--full-file", action="store_true")
+    parser.add_argument(
+        "--format", choices=("addendum", "full"), default="full"
+    )
+    parser.add_argument(
+        "--tier", choices=("core", "stats", "full"), default="full"
+    )
     parser.add_argument("--truncate-minmax", type=int, default=16)
     args = parser.parse_args()
-    output = args.output or args.input.with_suffix(args.input.suffix + ".page-modular")
+    output = args.output or args.input.with_suffix(
+        args.input.suffix + ".page-" + args.format
+    )
 
     unused_file_size, footer_start, footer_bytes, footer = read_footer(args.input)
     chunks, pages = scan_pages(args.input, footer)
@@ -996,9 +1541,8 @@ def main():
         chunks,
         pages,
         args.truncate_minmax,
-    )
-    legacy_index_bytes, legacy_footer_bytes, legacy_total = add_index_locators(
-        footer, chunks, footer_start
+        args.format,
+        args.tier,
     )
     write_output(args.input, output, footer_start, details, args.full_file)
 
@@ -1007,18 +1551,38 @@ def main():
         page.page_type in (DATA_PAGE, DATA_PAGE_V2) for page in pages
     )
     dictionary_pages = sum(page.page_type == DICTIONARY_PAGE for page in pages)
+    offset_index_bytes = sum(
+        chunk.offset_index_length or 0
+        for group_chunks in chunks
+        for chunk in group_chunks
+    )
+    column_index_bytes = sum(
+        chunk.column_index_length or 0
+        for group_chunks in chunks
+        for chunk in group_chunks
+    )
     print("column_chunks {}".format(num_chunks))
     print("data_pages {}".format(data_pages))
     print("dictionary_pages {}".format(dictionary_pages))
     print("page_regions {}".format(data_pages + dictionary_pages))
     print("regions {}".format(details["num_regions"]))
     print("standard_footer_bytes {}".format(len(footer_bytes)))
-    print("legacy_offset_index_bytes {}".format(legacy_index_bytes))
-    print("legacy_footer_with_index_locators_bytes {}".format(legacy_footer_bytes))
-    print("legacy_footer_and_offset_index_bytes {}".format(legacy_total))
+    print("source_offset_index_bytes {}".format(offset_index_bytes))
+    print("source_column_index_bytes {}".format(column_index_bytes))
+    print("source_footer_and_page_index_bytes {}".format(
+        len(footer_bytes) + offset_index_bytes + column_index_bytes
+    ))
+    print("offset_indexed_column_chunks {}".format(
+        details["offset_indexed_column_chunks"]
+    ))
+    print("column_indexed_column_chunks {}".format(
+        details["indexed_column_chunks"]
+    ))
     print("page_addressing_bytes {}".format(details["addressing_bytes"]))
     print("page_placement_bytes {}".format(details["placement_bytes"]))
     print("page_statistics_bytes {}".format(details["statistics_bytes"]))
+    print("page_row_statistics_bytes {}".format(details["row_statistics_bytes"]))
+    print("page_column_index_bytes {}".format(details["column_index_bytes"]))
     print("page_modular_total_bytes {}".format(len(details["metadata"])))
     for name, (region, offset, length) in details["module_regions"].items():
         print("{} region={} off={} len={}".format(name, region, offset, length))

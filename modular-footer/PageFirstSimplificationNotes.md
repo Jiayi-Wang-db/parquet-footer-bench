@@ -1,73 +1,58 @@
 # Page-First Footer Simplification Notes
 
-## Goal
+## Access invariant
 
-Simplify the page-first modular footer by reducing opaque encoded `binary` arrays and generic
-`EncodedArray` usage.
+Metadata must support direct access to a column, not random access within a column. A reader can
+project column `foo` without reading column `bar`; after selecting `foo`, it sequentially decodes
+that column's metadata.
 
-The access invariant is random access to a column, not random access within a column. A reader must
-be able to project metadata for column `foo` without reading metadata for column `bar`. Once the
-reader has selected `foo`, it is acceptable to read or decode all metadata for `foo` sequentially.
+## Shared decisions
 
-Prefer ordinary Thrift fields and lists where they satisfy this invariant. DBP, packed binaries,
-`EncodedArray`, or another specialized representation should remain only when justified by
-cross-column access, sparsity, size, or another explicit requirement.
+- `RegionMap.region_offsets` is one required strict-DBP `binary`, without an encoding enum or
+  wrapper struct.
+- `PageDirectory.column_data_page_regions` is one fixed-width packed `binary`, indexed by leaf
+  column ordinal.
+- Each `ColumnDataPages` integer array uses a local, self-counting `EncodedArray`. The writer emits
+  the smaller of fixed-width bit-packing and strict DBP. There is no RLE, default value, domain
+  table, or sparse presence encoding.
+- Exact page encodings remain in page headers. Placement retains one whole-column
+  `is_fully_dictionary_encoded` boolean.
+- Module directories are ordinary Compact-Thrift lists. Schema and file metadata use ordinary
+  Compact-Thrift structures.
 
-Review each remaining case individually before editing the Thrift definition.
+## PAR1-only decisions
 
-## Decisions
+- `row_group_region_ordinals` and `row_group_num_rows` are required strict-DBP binaries. The former
+  has `num_row_groups + 1` values and the latter has `num_row_groups` values.
+- Existing row-group `ColumnStatistics` and its sparse `ModularFooter.EncodedArray` fields remain
+  unchanged to keep the addendum small.
+- Flat Column Index descriptors also retain `ModularFooter.EncodedArray`, because a PAR1 file may
+  have page indexes for only some row groups or statistics for only some pages.
 
-- `RegionMap.region_offsets`: keep as one required DBP-encoded `binary`. Do not add an encoding
-  enum, array wrapper, or generic `EncodedArray` framing.
-- `PageDirectory.column_data_page_regions`: use one required fixed-width bit-packed `binary`. The
-  root's `num_columns` supplies the count; every leaf column has a descriptor region.
-- `ColumnDataPages`: encode `region_ordinals`, `first_row_indexes`, `codecs`,
-  `dictionary_regions`, `num_values`, and `total_uncompressed_sizes` as the smaller of fixed-width
-  bit-packing and strict DBP for each array. The local `EncodedArray` contains only a binary whose
-  first byte identifies the encoding; bit-packed arrays add a ULEB128 count while DBP uses its
-  native count. Exact page encodings remain in page headers, with only
-  `is_fully_dictionary_encoded` summarized in the column descriptor. No shared page count remains.
-- `RowRangeStatisticsDirectory`: localize column sparsity here with an optional LSB-first
-  presence bitmap and a compact fixed-width bit-packed array of descriptor region ordinals in
-  column order. Omit the bitmap when every column is present. Readers may materialize a dense
-  column-to-region lookup once; do not add on-disk rank checkpoints initially.
-- `RowRangeStatistics`: keep all data sequential within a selected column. Self-counting range
-  starts use the local adaptive `EncodedArray`; no separate range count remains. Null and NaN
-  counts are optional dense adaptive arrays. Min/max shares one range-presence bitmap, while
-  prefix lengths and interleaved suffix lengths use adaptive arrays with separate concatenated
-  byte payloads. One interleaved bitset carries min/max exactness.
-- `SchemaIndexModule`: define it locally and keep every cross-schema lookup array fixed-width
-  bit-packed. It is the optional random-access path into an otherwise sequential Compact-Thrift
-  `SchemaModule`.
-- `PageFirstModularFooter.thrift` includes only `parquet.thrift`. It defines its own
-  `EncodedArray`, schema module, file-metadata module, and schema-index module and has no dependency
-  on `ModularFooter.thrift`.
+## PAR3-only decisions
 
-The preceding all-DBP `ColumnDataPages` experiment reduced page-placement bytes by 50% to 60% on
-the three large Raincloud files. It increased Yellow Taxi page placement from 2,927 bytes to 7,267
-bytes (+148%) because its columns contain only a few pages and strict DBP pads partial miniblocks.
-
-Self-counting adaptive arrays produce 277,795 bytes for US Accidents, 63,643 bytes for FineWeb,
-115,141 bytes for Hacker News, and 3,289 bytes for Yellow Taxi. Relative to all-DBP, the three large
-files grow by 0.1% to 0.2% from encoding tags and framing, while Yellow Taxi shrinks by 54.7%. It
-remains 134.3% larger than current modular placement rather than 417.6%.
+- There are no row-group arrays or `num_row_groups`.
+- Statistics sparsity across columns is localized to `RowRangeStatisticsDirectory`: an optional
+  presence bitmap plus packed descriptor region ordinals.
+- Within one participating column, row ranges densely cover all file rows. Range starts and count
+  arrays use the local adaptive `EncodedArray`; min/max has its own range-presence bitmap.
+- Min/max prefixes and suffixes use adaptive length arrays plus concatenated byte payloads.
+  Exactness is an interleaved min/max bitset.
+- Boundary order is one flat two-bit value per participating column.
 
 ## Representation audit
 
-| Area | Representation | Why |
+| Area | Representation | Access |
 | --- | --- | --- |
-| Region boundaries | Strict DBP `binary` | Mandatory global data; decode once for maximum compactness |
-| Module directory | Ordinary Compact-Thrift list | Always read and contains only one entry per module kind |
-| Schema | Ordinary Compact-Thrift list | Read fully unless the optional schema index is present |
-| Schema index | Fixed-width packed binaries | Direct path, element, leaf, and parent lookup |
-| Column page directory | Fixed-width packed binary | Direct leaf-column ordinal lookup |
-| Per-column page metadata | Adaptive bit-packed/DBP `EncodedArray` | Sequential after selecting a column; writer emits smaller form |
-| Statistics presence | Bitmap plus packed region ordinals | Compact column sparsity; reader may materialize lookup once |
-| Per-column range starts | Adaptive `EncodedArray` | Sequential after selecting a column |
-| Null and NaN counts | Optional adaptive `EncodedArray` values | Sequential and compact; absent means unavailable for the column |
-| Min/max statistics | Shared presence, adaptive length arrays, concatenated bytes | One sparse domain and no per-value Thrift binary framing |
-| Min/max exactness | Interleaved packed bits | Shares min/max presence and disappears when every bound is exact |
-| File metadata | Ordinary Compact-Thrift fields | Optional descriptive data consumed as a whole |
+| Region boundaries | Strict DBP binary | Decode mandatory global map once |
+| PAR1 row groups | Two strict DBP binaries | Decode mandatory PAR1 arrays once |
+| Column page directory | Fixed-width packed binary | Direct leaf-column lookup |
+| Per-column page metadata | Adaptive bit-packed/DBP arrays | Sequential after column selection |
+| PAR1 row-group statistics | Current modular sparse arrays | Compatibility with current proposal |
+| PAR1 flat Column Index | Current modular sparse arrays | Supports missing chunk/page statistics |
+| PAR3 statistics presence | Bitmap plus packed region ordinals | Direct membership, popcount for rank |
+| PAR3 per-column statistics | Sequential adaptive arrays and binaries | Sequential after column selection |
+| Schema index | Fixed-width packed binaries | Optional direct schema lookup |
 
-No cross-column lookup uses adaptive DBP. No within-column array pays for random access that the
+No cross-column lookup uses adaptive DBP. No PAR3 within-column array pays for random access that a
 reader does not need.

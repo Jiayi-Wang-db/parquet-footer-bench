@@ -16,8 +16,8 @@
 // under the License.
 
 // parquet_to_modular: read a Parquet file's footer and translate it, in full,
-// into the modular-footer layout (see ModularFooter.thrift), writing the modular
-// bytes and a per-module size breakdown.
+// into the modular-footer layout (see ModularFooter.thrift), writing the
+// modular bytes and a per-module size breakdown.
 //
 // Dependency-free, like the rest of this repo: a small Thrift Compact codec is
 // vendored below (a superset of include/pfb/thrift_compact.h -- it also handles
@@ -26,7 +26,9 @@
 // (CMakeLists.txt target modular_footer_convert) and any C++17 compiler.
 //
 //   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-//   ./build/modular_footer_convert [--page-index] [--full-file] [--schema-index]
+//   ./build/modular_footer_convert [--page-index] [--no-statistics]
+//   [--full-file]
+//       [--schema-index]
 //       input.parquet [output.modular]
 //
 // Translates every module the FileMetaData footer carries:
@@ -38,24 +40,25 @@
 //   * file metadata      (created_by + key_value_metadata)
 //
 // With --schema-index it also emits the optional SCHEMA_INDEX module: an
-// open-addressed FNV-1a-64 name -> leaf-ordinal hash table (power-of-two slots at
-// ~0.7 load, 8 discriminator bits) plus per-element byte offsets into the schema
-// module, so a reader resolves K queried column names in O(K) instead of walking
-// every SchemaElement. leaf_element_indexes is omitted for a flat schema (leaf
-// ordinal c is element c + 1). Purely additive: readers that do not understand the
-// kind, or footers written without the flag, fall back to walking the schema.
+// open-addressed FNV-1a-64 name -> leaf-ordinal hash table (power-of-two slots
+// at ~0.7 load, 8 discriminator bits) plus per-element byte offsets into the
+// schema module, so a reader resolves K queried column names in O(K) instead of
+// walking every SchemaElement. leaf_element_indexes is omitted for a flat
+// schema (leaf ordinal c is element c + 1). Purely additive: readers that do
+// not understand the kind, or footers written without the flag, fall back to
+// walking the schema.
 //
-// With --page-index it also emits the OFFSET_INDEX and COLUMN_INDEX modules, but
-// only when that page-index data is actually present and reachable: the blobs
-// live at absolute file offsets before the footer, so this needs a full file
-// (leading PAR1 magic) whose page-index ranges lie within it. Nothing is
+// With --page-index it also emits the OFFSET_INDEX and COLUMN_INDEX modules,
+// but only when that page-index data is actually present and reachable: the
+// blobs live at absolute file offsets before the footer, so this needs a full
+// file (leading PAR1 magic) whose page-index ranges lie within it. Nothing is
 // invented -- a bare tail, or a file without a page index, emits none.
 //
 // With --truncate-minmax[=N] (default N=16) the stored min/max suffixes are cut
-// to at most N bytes: the min suffix to a prefix (still a valid lower bound) and
-// the max suffix rounded up (still a valid upper bound), clearing the exactness
-// bit when truncated. Applies to row-group statistics and, with --page-index,
-// the column index.
+// to at most N bytes: the min suffix to a prefix (still a valid lower bound)
+// and the max suffix rounded up (still a valid upper bound), clearing the
+// exactness bit when truncated. Applies to row-group statistics and, with
+// --page-index, the column index.
 //
 // With --full-file the output remains a self-contained data file: everything
 // before the original Thrift footer is copied verbatim, followed by the modular
@@ -807,12 +810,15 @@ static std::string BuildSchemaIndex(const SchemaLayout& sl, int64_t elements_bas
 int main(int argc, char** argv) {
   std::vector<std::string> pos;
   bool emit_pi = false;
+  bool emit_stats = true;
   bool emit_full_file = false;
   bool emit_si = false;  // schema index: opt-in, off by default
   int trunc = 0;  // max min/max suffix bytes; 0 = no truncation
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--page-index" || a == "-p") emit_pi = true;
+    else if (a == "--no-statistics")
+      emit_stats = false;
     else if (a == "--full-file") emit_full_file = true;
     else if (a == "--schema-index" || a == "-s") emit_si = true;
     else if (a == "--truncate-minmax") trunc = 16;
@@ -821,9 +827,10 @@ int main(int argc, char** argv) {
   }
   if (pos.empty()) {
     std::fprintf(stderr,
-        "usage: %s [--page-index] [--full-file] [--schema-index] "
-        "[--truncate-minmax[=N]] input.parquet [output.modular]\n",
-        argv[0]);
+                 "usage: %s [--page-index] [--no-statistics] [--full-file] "
+                 "[--schema-index] "
+                 "[--truncate-minmax[=N]] input.parquet [output.modular]\n",
+                 argv[0]);
     return 2;
   }
   const std::string in_path = pos[0];
@@ -928,9 +935,12 @@ int main(int argc, char** argv) {
     // by a column_offsets directory (absolute offsets into the output buffer).
     std::vector<std::string> col_desc(C);
     bool have_stats = false;
-    for (int c = 0; c < C; ++c) {
-      col_desc[c] = BuildColumnStatistics(fm, c, G, trunc);
-      if (!col_desc[c].empty()) have_stats = true;
+    if (emit_stats) {
+      for (int c = 0; c < C; ++c) {
+        col_desc[c] = BuildColumnStatistics(fm, c, G, trunc);
+        if (!col_desc[c].empty())
+          have_stats = true;
+      }
     }
 
     // ---- Lay out the output and collect the directory. Core sections are
