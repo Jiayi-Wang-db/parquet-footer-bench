@@ -25,23 +25,41 @@ struct EncodedArray {
   1: required binary values
 }
 
-struct ColumnDataPages {
-  1: required EncodedArray region_ordinals,
-  2: required EncodedArray first_row_indexes,
-  3: required bool is_fully_dictionary_encoded,
-  4: required EncodedArray codecs,
-  5: required EncodedArray dictionary_regions,
-  6: required EncodedArray num_values,
-  7: required EncodedArray total_uncompressed_sizes
+/** Parallel arrays indexed by row-group ordinal for one leaf column. */
+struct ColumnPageDirectory {
+  1: required EncodedArray chunk_region_ordinals,
+  /** Number of data pages in the chunk; dictionary pages are excluded. */
+  2: required EncodedArray page_counts,
+  3: required EncodedArray total_uncompressed_sizes,
+  4: required EncodedArray num_values,
+  5: required EncodedArray codecs,
+  6: required EncodedArray is_fully_dictionary_encoded
 }
 
+/** One independently addressable ColumnPageDirectory region ordinal per leaf column. */
 struct PageDirectory {
-  1: required binary column_data_page_regions
+  1: required binary column_page_directory_regions
 }
 
 /**
- * One descriptor for a leaf column across the complete file. Page arrays use the corresponding
- * ColumnDataPages order. Sparse positions represent pages whose PAR1 column chunk has no
+ * Offset Index for one leaf column across the complete file. Relative offsets reset at each chunk
+ * boundary identified by ColumnPageDirectory.page_counts. Page sizes are derived from the next
+ * relative offset or the chunk-region end. first_row_indexes are absolute within the file.
+ */
+struct FlatOffsetIndex {
+  1: required EncodedArray relative_data_page_offsets,
+  2: required EncodedArray first_row_indexes
+}
+
+/** Compact descriptors for the leaf columns that have at least one source OffsetIndex. */
+struct FlatOffsetIndexDirectory {
+  1: optional binary present_columns,
+  2: required binary offset_index_regions
+}
+
+/**
+ * One descriptor for a leaf column across the complete file. Page arrays align with that column's
+ * FlatOffsetIndex data-page order. Sparse positions represent pages whose PAR1 column chunk has no
  * ColumnIndex. boundary_orders uses row-group ordinals as its logical domain.
  */
 struct FlatColumnIndex {
@@ -75,9 +93,10 @@ enum ModuleKind {
   SCHEMA = 0,
   PAGE_DIRECTORY = 1,
   ROW_GROUP_STATISTICS = 2,
-  FLAT_COLUMN_INDEX = 3,
-  FILE_METADATA = 4,
-  SCHEMA_INDEX = 5
+  FLAT_OFFSET_INDEX = 3,
+  FLAT_COLUMN_INDEX = 4,
+  FILE_METADATA = 5,
+  SCHEMA_INDEX = 6
 }
 
 struct ModuleDirectoryEntry {

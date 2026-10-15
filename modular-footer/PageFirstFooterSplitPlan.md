@@ -15,11 +15,15 @@ has been committed or pushed.
 
 - Start from the current modular-footer proposal and reuse unchanged schema, file-metadata,
   schema-index, and row-group-statistics structures.
-- Replace column-chunk placement with page placement.
+- Make each column chunk one region. Address one per-column descriptor containing parallel chunk
+  region ordinals, page counts, uncompressed sizes, value counts, codecs, and dictionary flags.
 - Require DBP `row_group_region_ordinals` (`N + 1` region borders) and DBP
   `row_group_num_rows` (`N` row counts). Retain `num_row_groups` and validate all counts and the sum
   of row counts.
-- Remove Offset Index because page placement supplies page regions and first-row indexes.
+- Replace chunk-oriented Offset Index with one flat descriptor per fully participating column.
+  Store data-page offsets relative to each chunk-region start and file-global first-row indexes.
+  Prefix-sum page counts to locate each chunk's page slice and derive page sizes from the next
+  relative offset or chunk-region end.
 - Replace chunk-oriented Column Index with one descriptor per column. Its page arrays align with
   `ColumnDataPages`; sparse positions represent row groups without a Column Index. Preserve
   `boundary_order` per `(column, row group)`, since PAR1 ordering may restart at every row group.
@@ -39,7 +43,8 @@ has been committed or pushed.
 1. Define the two public Thrift files, reusing current modular types in the addendum where possible
    and keeping the full PAR3 definition independent.
 2. Update the PAR1 converter to emit required row-group arrays, existing row-group statistics, and
-   a flat Column Index when source indexes exist. Add count, ordering, and page-alignment checks.
+   flat Offset Index and Column Index modules when source indexes exist. Add count, ordering, and
+   page-alignment checks.
 3. Retain or add a PAR3 conversion path for row-range statistics and global per-column boundary
    order.
 4. Regenerate the benchmark corpus using Raincloud's parquet-java target rather than the existing
@@ -53,9 +58,9 @@ has been committed or pushed.
    - **modular core:** framing, file metadata, schema, and placement;
    - **modular core + stats:** core plus row-group statistics for current modular/PAR1, or
      row-range statistics for PAR3;
-   - **modular full:** current modular adds Offset Index and Column Index; PAR1 adds only flat
-     Column Index because placement subsumes Offset Index; PAR3 is identical to core + stats
-     because placement subsumes Offset Index and row-range statistics subsume Column Index.
+   - **modular full:** current modular adds Offset Index and Column Index; PAR1 adds flat Offset
+     Index and Column Index; PAR3 is identical to core + stats because placement subsumes Offset
+     Index and row-range statistics subsume Column Index.
    Serialize each modular tier independently so its directory, region map, root, and other framing
    are measured exactly. Compare core + stats with the Thrift footer only where they carry the same
    coarse statistics; compare full with Thrift full. PAR3's page-granular row-range statistics make

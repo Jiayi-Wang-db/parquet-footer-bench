@@ -10,13 +10,11 @@ that column's metadata.
 
 - `RegionMap.region_offsets` is one required strict-DBP `binary`, without an encoding enum or
   wrapper struct.
-- `PageDirectory.column_data_page_regions` is one fixed-width packed `binary`, indexed by leaf
-  column ordinal.
-- Each `ColumnDataPages` integer array uses a local, self-counting `EncodedArray`. The writer emits
-  the smaller of fixed-width bit-packing and strict DBP. There is no RLE, default value, domain
-  table, or sparse presence encoding.
-- Exact page encodings remain in page headers. Placement retains one whole-column
-  `is_fully_dictionary_encoded` boolean.
+- Page-directory descriptor ordinals are one fixed-width packed `binary`, indexed by leaf column
+  ordinal.
+- Sequential integer arrays use a local, self-counting `EncodedArray`. The writer emits the smaller
+  of fixed-width bit-packing and strict DBP. There is no RLE or default-value encoding.
+- Exact page encodings remain in page headers.
 - Module directories are ordinary Compact-Thrift lists. Schema and file metadata use ordinary
   Compact-Thrift structures.
 
@@ -24,6 +22,12 @@ that column's metadata.
 
 - `row_group_region_ordinals` and `row_group_num_rows` are required strict-DBP binaries. The former
   has `num_row_groups + 1` values and the latter has `num_row_groups` values.
+- Every column chunk is one region. Each leaf column has an independently addressed
+  `ColumnPageDirectory` with chunk-region ordinals, page counts, uncompressed sizes, value counts,
+  codecs, and dictionary flags indexed by row-group ordinal.
+- A flat Offset Index stores data-page offsets relative to each chunk-region start and file-global
+  first-row indexes. Prefix-summing page counts identifies each chunk's slice. It is emitted for a
+  column only when every chunk participates.
 - Existing row-group `ColumnStatistics` and its sparse `ModularFooter.EncodedArray` fields remain
   unchanged to keep the addendum small.
 - Flat Column Index descriptors also retain `ModularFooter.EncodedArray`, because a PAR1 file may
@@ -47,7 +51,9 @@ that column's metadata.
 | Region boundaries | Strict DBP binary | Decode mandatory global map once |
 | PAR1 row groups | Two strict DBP binaries | Decode mandatory PAR1 arrays once |
 | Column page directory | Fixed-width packed binary | Direct leaf-column lookup |
-| Per-column page metadata | Adaptive bit-packed/DBP arrays | Sequential after column selection |
+| PAR1 per-column chunks | Adaptive bit-packed/DBP arrays | Sequential after column selection |
+| PAR1 flat Offset Index | Relative offsets and file-global rows | Page slice from page-count prefix sum |
+| PAR3 per-column pages | Adaptive bit-packed/DBP arrays | Sequential after column selection |
 | PAR1 row-group statistics | Current modular sparse arrays | Compatibility with current proposal |
 | PAR1 flat Column Index | Current modular sparse arrays | Supports missing chunk/page statistics |
 | PAR3 statistics presence | Bitmap plus packed region ordinals | Direct membership, popcount for rank |

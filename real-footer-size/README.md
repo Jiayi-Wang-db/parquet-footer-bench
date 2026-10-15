@@ -89,10 +89,10 @@ side would not be an apples-to-apples footer-size comparison.
 The [design notes](../modular-footer/PageFirstModularFooter.md) split the transition into
 [`PageFirstModularFooterAddendum.thrift`](../modular-footer/PageFirstModularFooterAddendum.thrift)
 for PAR1 and [`PageFirstModularFooterFull.thrift`](../modular-footer/PageFirstModularFooterFull.thrift)
-for PAR3. Both replace column-chunk placement with an always-read DBP region map and independently
-addressed per-column page descriptors. PAR1 retains required row-group arrays, row-group
-statistics, and a flattened Column Index. PAR3 has no row groups or Column Index and uses row-range
-statistics.
+for PAR3. Both use an always-read DBP region map. PAR1 uses one region per column chunk, per-column
+chunk descriptors with page counts, and flattened per-column Offset Index and Column Index modules.
+It retains required row-group arrays and row-group statistics. PAR3 has per-column page placement,
+no row groups or page-index modules, and uses row-range statistics.
 
 These measurements use files produced by Raincloud commit `7357517`'s actual parquet-java 1.17.1
 sidecar target. The target defaults to ZSTD, a 128 MiB encoded row-group target, 1 MiB pages, a
@@ -134,6 +134,13 @@ All modular statistics use a 16-byte min/max suffix limit. Each tier is serializ
 so its directory, region map, root, and framing reflect only its included modules. Fixed
 magic/length trailers are excluded consistently.
 
+| Dataset | Thrift core + stats | Thrift core + stats + indexes | Modular core | Modular core + stats | Modular core + stats + indexes | PAR1 core | PAR1 core + stats | PAR1 core + stats + indexes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| US Accidents | 14,079 B | 112,106 B | 8,919 B | 12,229 B | 82,490 B | 10,997 B | 14,276 B | 60,145 B |
+| FineWeb | 26,693 B | 159,589 B | 2,826 B | 6,653 B | 69,860 B | 2,698 B | 6,508 B | 45,416 B |
+| Hacker News | 6,380 B | 145,910 B | 3,317 B | 4,736 B | 38,058 B | 3,868 B | 5,266 B | 30,013 B |
+| Yellow Taxi | 5,183 B | 116,247 B | 2,942 B | 4,352 B | 98,573 B | 3,827 B | 5,241 B | 67,016 B |
+
 | Dataset | Thrift footer | Thrift full |
 | --- | ---: | ---: |
 | US Accidents | 14,079 B | 112,106 B |
@@ -150,14 +157,13 @@ magic/length trailers are excluded consistently.
 
 | Dataset | PAR1 addendum core | Core + RG stats | vs Thrift footer | PAR1 addendum full | vs Thrift full |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| US Accidents | 26,311 B | 29,626 B | +110.4% | 70,224 B | −37.4% |
-| FineWeb | 29,205 B | 33,021 B | +23.7% | 58,043 B | −63.6% |
-| Hacker News | 12,632 B | 14,088 B | +120.8% | 34,185 B | −76.6% |
-| Yellow Taxi | 18,391 B | 19,791 B | +281.8% | 75,225 B | −35.3% |
+| US Accidents | 10,997 B | 14,276 B | +1.4% | 60,145 B | −46.4% |
+| FineWeb | 2,698 B | 6,508 B | −75.6% | 45,416 B | −71.5% |
+| Hacker News | 3,868 B | 5,266 B | −17.5% | 30,013 B | −79.4% |
+| Yellow Taxi | 3,827 B | 5,241 B | +1.1% | 67,016 B | −42.4% |
 
-PAR1 core already contains page-level placement, so its comparison with the chunk-oriented Thrift
-footer exposes the cost of that richer placement. PAR1 full adds flat Column Index only; page
-placement has already subsumed Offset Index.
+PAR1 core uses one region per column chunk and per-column chunk descriptors. PAR1 full adds flat
+per-column Offset Index and Column Index modules.
 
 | Dataset | PAR3 core | Core + row-range stats | PAR3 full | vs Thrift full |
 | --- | ---: | ---: | ---: | ---: |

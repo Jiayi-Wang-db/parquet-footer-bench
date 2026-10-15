@@ -27,8 +27,9 @@ K_FILE_METADATA = 3
 ADD_K_SCHEMA = 0
 ADD_K_PAGE_DIRECTORY = 1
 ADD_K_ROW_GROUP_STATISTICS = 2
-ADD_K_FLAT_COLUMN_INDEX = 3
-ADD_K_FILE_METADATA = 4
+ADD_K_FLAT_OFFSET_INDEX = 3
+ADD_K_FLAT_COLUMN_INDEX = 4
+ADD_K_FILE_METADATA = 5
 
 DATA_PAGE = 0
 DICTIONARY_PAGE = 2
@@ -309,6 +310,8 @@ class Chunk:
         self.offset_index = None
         self.column_index = None
         self.pages = []
+        self.start_offset = None
+        self.region = None
 
 
 def parse_page_header(fields):
@@ -637,6 +640,7 @@ def scan_pages(path, footer):
                 start = chunk.data_offset
                 if chunk.dictionary_offset is not None:
                     start = min(start, chunk.dictionary_offset)
+                chunk.start_offset = start
                 end = start + chunk.total_compressed
                 offset = start
                 first_row = 0
@@ -855,7 +859,7 @@ def build_modular_column_statistics(column_chunks, suffix_limit):
 def build_flat_column_index(column_chunks, suffix_limit):
     page_domain = sum(
         sum(page.page_type in (DATA_PAGE, DATA_PAGE_V2) for page in chunk.pages)
-        for chunk in column_chunks
+        for chunk in column_chunks if chunk.offset_index is not None
     )
     boundary_positions = []
     boundary_values = []
@@ -871,6 +875,10 @@ def build_flat_column_index(column_chunks, suffix_limit):
     max_exact = []
     page_base = 0
     for group, chunk in enumerate(column_chunks):
+        if chunk.offset_index is None:
+            if chunk.column_index is not None:
+                raise ValueError("ColumnIndex is present without OffsetIndex")
+            continue
         page_count = sum(
             page.page_type in (DATA_PAGE, DATA_PAGE_V2) for page in chunk.pages
         )
@@ -949,6 +957,30 @@ def build_flat_column_index(column_chunks, suffix_limit):
                 ),
             ])
     return compact.encode(fields)
+
+
+def build_flat_offset_index(column_chunks):
+    if any(chunk.offset_index is None for chunk in column_chunks):
+        return b""
+    relative_data_page_offsets = []
+    first_row_indexes = []
+    for chunk in column_chunks:
+        data_pages = [
+            page for page in chunk.pages
+            if page.page_type in (DATA_PAGE, DATA_PAGE_V2)
+        ]
+        if len(data_pages) != len(chunk.offset_index):
+            raise ValueError("OffsetIndex page count disagrees with scanned pages")
+        relative_data_page_offsets.extend(
+            page.offset - chunk.start_offset for page in data_pages
+        )
+        first_row_indexes.extend(page.first_row for page in data_pages)
+    if not relative_data_page_offsets:
+        return b""
+    return compact.encode([
+        encoded_field(1, adaptive_array(relative_data_page_offsets)),
+        encoded_field(2, adaptive_array(first_row_indexes)),
+    ])
 
 
 def build_row_range_statistics_descriptor(statistics, range_start_rows, suffix_limit):
@@ -1151,15 +1183,37 @@ def initial_region_offsets(pages, footer_start):
     return ordered
 
 
-def build_row_group_region_ordinals(chunks, offsets, footer_start):
+def initial_chunk_region_offsets(chunks, footer_start):
+    boundaries = {0, footer_start}
+    intervals = []
+    for group_chunks in chunks:
+        for chunk in group_chunks:
+            start = chunk.start_offset
+            end = start + chunk.total_compressed
+            boundaries.add(start)
+            boundaries.add(end)
+            intervals.append((start, end))
+    ordered = sorted(boundaries)
+    for start, end in intervals:
+        index = bisect.bisect_left(ordered, start)
+        if index + 1 >= len(ordered) or ordered[index + 1] != end:
+            raise ValueError("a column chunk does not occupy exactly one region")
+    return ordered
+
+
+def build_row_group_region_ordinals(chunks, offsets, footer_start, pages_are_regions):
     end_border = bisect.bisect_left(offsets, footer_start)
     if end_border == len(offsets) or offsets[end_border] != footer_start:
         raise ValueError("footer start is not a region boundary")
     borders = [None] * len(chunks)
     for group_ordinal, group_chunks in enumerate(chunks):
-        pages = [page for chunk in group_chunks for page in chunk.pages]
-        if pages:
-            borders[group_ordinal] = min(page.region for page in pages)
+        regions = (
+            [page.region for chunk in group_chunks for page in chunk.pages]
+            if pages_are_regions
+            else [chunk.region for chunk in group_chunks]
+        )
+        if regions:
+            borders[group_ordinal] = min(regions)
     next_border = end_border
     for group_ordinal in range(len(borders) - 1, -1, -1):
         border = borders[group_ordinal]
@@ -1170,10 +1224,16 @@ def build_row_group_region_ordinals(chunks, offsets, footer_start):
         next_border = borders[group_ordinal]
     borders.append(end_border)
     for group_ordinal, group_chunks in enumerate(chunks):
-        for chunk in group_chunks:
-            for page in chunk.pages:
-                if not borders[group_ordinal] <= page.region < borders[group_ordinal + 1]:
-                    raise ValueError("row-group pages do not form contiguous physical spans")
+        regions = (
+            [page.region for chunk in group_chunks for page in chunk.pages]
+            if pages_are_regions
+            else [chunk.region for chunk in group_chunks]
+        )
+        if any(
+            not borders[group_ordinal] <= region < borders[group_ordinal + 1]
+            for region in regions
+        ):
+            raise ValueError("row-group data does not form a contiguous physical span")
     return borders
 
 
@@ -1206,12 +1266,21 @@ def build_page_footer(
         raise ValueError("unknown metadata tier {}".format(tier))
     groups = row_groups(footer)
     num_columns = len(chunks[0])
-    offsets = initial_region_offsets(pages, footer_start)
+    offsets = (
+        initial_chunk_region_offsets(chunks, footer_start)
+        if footer_format == "addendum"
+        else initial_region_offsets(pages, footer_start)
+    )
     region_by_offset = {offset: index for index, offset in enumerate(offsets[:-1])}
-    for page in pages:
-        page.region = region_by_offset[page.offset]
+    if footer_format == "addendum":
+        for group_chunks in chunks:
+            for chunk in group_chunks:
+                chunk.region = region_by_offset[chunk.start_offset]
+    else:
+        for page in pages:
+            page.region = region_by_offset[page.offset]
     row_group_ordinals = build_row_group_region_ordinals(
-        chunks, offsets, footer_start
+        chunks, offsets, footer_start, footer_format == "full"
     )
     row_group_num_rows = [
         required(group, 3, compact.I64, "RowGroup.num_rows") for group in groups
@@ -1223,6 +1292,8 @@ def build_page_footer(
     stats_directory_bytes = 0
     column_index_descriptor_bytes = 0
     column_index_directory_bytes = 0
+    offset_index_descriptor_bytes = 0
+    offset_index_directory_bytes = 0
 
     column_pages = [[] for unused in range(num_columns)]
     for group_chunks in chunks:
@@ -1232,14 +1303,15 @@ def build_page_footer(
                 if page.page_type in (DATA_PAGE, DATA_PAGE_V2)
             )
 
-    page_regions = []
     for column in range(num_columns):
         for group_chunks in chunks:
             chunk = group_chunks[column]
             dictionary = next(
                 (page for page in chunk.pages if page.page_type == DICTIONARY_PAGE), None
             )
-            dictionary_region = None if dictionary is None else dictionary.region
+            dictionary_region = None if dictionary is None else (
+                dictionary.region if footer_format == "full" else chunk.region
+            )
             for page in chunk.pages:
                 if page.page_type not in (DATA_PAGE, DATA_PAGE_V2):
                     continue
@@ -1248,37 +1320,78 @@ def build_page_footer(
                     raise ValueError("dictionary-encoded page has no dictionary page")
                 page.dictionary_region = dictionary_region if uses_dictionary else None
 
-        column_page_values = column_pages[column]
-        page_blob = compact.encode([
-            encoded_field(1, adaptive_array([
-                page.region for page in column_page_values
-            ])),
-            encoded_field(2, adaptive_array([
-                page.first_row for page in column_page_values
-            ])),
-            [3, compact.BOOL_TRUE, bool(column_page_values) and all(
-                page.dictionary_region is not None for page in column_page_values
-            )],
-            encoded_field(4, adaptive_array([
-                page.codec for page in column_page_values
-            ])),
-            encoded_field(5, adaptive_array([
-                0 if page.dictionary_region is None else page.dictionary_region + 1
-                for page in column_page_values
-            ])),
-            encoded_field(6, adaptive_array([
-                page.num_values for page in column_page_values
-            ])),
-            encoded_field(7, adaptive_array([
-                page.total_uncompressed_size for page in column_page_values
-            ])),
+    page_regions = []
+    if footer_format == "addendum":
+        for column in range(num_columns):
+            chunk_regions = []
+            page_counts = []
+            total_uncompressed_sizes = []
+            num_values = []
+            codecs = []
+            fully_dictionary_encoded = []
+            for group_chunks in chunks:
+                chunk = group_chunks[column]
+                data_pages = [
+                    page for page in chunk.pages
+                    if page.page_type in (DATA_PAGE, DATA_PAGE_V2)
+                ]
+                if not data_pages:
+                    raise ValueError("PAR1 column chunk has no data pages")
+                chunk_regions.append(chunk.region)
+                page_counts.append(len(data_pages))
+                total_uncompressed_sizes.append(chunk.total_uncompressed)
+                num_values.append(chunk.num_values)
+                codecs.append(chunk.codec)
+                fully_dictionary_encoded.append(all(
+                    page.dictionary_region is not None for page in data_pages
+                ))
+            page_blob = compact.encode([
+                encoded_field(1, adaptive_array(chunk_regions)),
+                encoded_field(2, adaptive_array(page_counts)),
+                encoded_field(3, adaptive_array(total_uncompressed_sizes)),
+                encoded_field(4, adaptive_array(num_values)),
+                encoded_field(5, adaptive_array(codecs)),
+                encoded_field(6, adaptive_array(fully_dictionary_encoded)),
+            ])
+            page_regions.append(layout.add(
+                "page_directory_{}".format(column), page_blob
+            ))
+            page_descriptor_bytes += len(page_blob)
+        page_directory = compact.encode([
+            [1, compact.BINARY, dense_values(page_regions)],
         ])
-        page_regions.append(layout.add("pages_{}".format(column), page_blob))
-        page_descriptor_bytes += len(page_blob)
-
-    page_directory = compact.encode([
-        [1, compact.BINARY, dense_values(page_regions)],
-    ])
+    else:
+        for column in range(num_columns):
+            column_page_values = column_pages[column]
+            page_blob = compact.encode([
+                encoded_field(1, adaptive_array([
+                    page.region for page in column_page_values
+                ])),
+                encoded_field(2, adaptive_array([
+                    page.first_row for page in column_page_values
+                ])),
+                [3, compact.BOOL_TRUE, bool(column_page_values) and all(
+                    page.dictionary_region is not None for page in column_page_values
+                )],
+                encoded_field(4, adaptive_array([
+                    page.codec for page in column_page_values
+                ])),
+                encoded_field(5, adaptive_array([
+                    0 if page.dictionary_region is None else page.dictionary_region + 1
+                    for page in column_page_values
+                ])),
+                encoded_field(6, adaptive_array([
+                    page.num_values for page in column_page_values
+                ])),
+                encoded_field(7, adaptive_array([
+                    page.total_uncompressed_size for page in column_page_values
+                ])),
+            ])
+            page_regions.append(layout.add("pages_{}".format(column), page_blob))
+            page_descriptor_bytes += len(page_blob)
+        page_directory = compact.encode([
+            [1, compact.BINARY, dense_values(page_regions)],
+        ])
     page_directory_region = layout.add("page_directory", page_directory)
     modules.append((K_PAGE_DIRECTORY, page_directory_region))
 
@@ -1341,10 +1454,38 @@ def build_page_footer(
             stats_directory_region,
         ))
 
-    column_index_positions = []
-    column_index_values = []
     if footer_format == "addendum" and tier == "full":
+        offset_index_positions = []
+        offset_index_values = []
         for column in range(num_columns):
+            descriptor = build_flat_offset_index(
+                [group_chunks[column] for group_chunks in chunks]
+            )
+            if not descriptor:
+                continue
+            region = layout.add("offset_index_{}".format(column), descriptor)
+            offset_index_positions.append(column)
+            offset_index_values.append(region)
+            offset_index_descriptor_bytes += len(descriptor)
+        if offset_index_positions:
+            fields = []
+            if len(offset_index_positions) != num_columns:
+                fields.append([
+                    1,
+                    compact.BINARY,
+                    presence_bitmap(num_columns, offset_index_positions),
+                ])
+            fields.append([2, compact.BINARY, dense_values(offset_index_values)])
+            directory = compact.encode(fields)
+            offset_index_directory_bytes = len(directory)
+            region = layout.add("flat_offset_index", directory)
+            modules.append((ADD_K_FLAT_OFFSET_INDEX, region))
+
+        column_index_positions = []
+        column_index_values = []
+        for column in range(num_columns):
+            if column not in offset_index_positions:
+                continue
             descriptor = build_flat_column_index(
                 [group_chunks[column] for group_chunks in chunks], suffix_limit
             )
@@ -1475,6 +1616,9 @@ def build_page_footer(
         "column_index_bytes": (
             column_index_descriptor_bytes + column_index_directory_bytes
         ),
+        "offset_index_bytes": (
+            offset_index_descriptor_bytes + offset_index_directory_bytes
+        ),
         "indexed_column_chunks": sum(
             chunk.column_index is not None
             for group_chunks in chunks
@@ -1583,6 +1727,7 @@ def main():
     print("page_statistics_bytes {}".format(details["statistics_bytes"]))
     print("page_row_statistics_bytes {}".format(details["row_statistics_bytes"]))
     print("page_column_index_bytes {}".format(details["column_index_bytes"]))
+    print("page_offset_index_bytes {}".format(details["offset_index_bytes"]))
     print("page_modular_total_bytes {}".format(len(details["metadata"])))
     for name, (region, offset, length) in details["module_regions"].items():
         print("{} region={} off={} len={}".format(name, region, offset, length))

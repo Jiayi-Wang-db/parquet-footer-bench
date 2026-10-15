@@ -29,8 +29,8 @@
 //   to
 //             each projected chunk. O(projected).
 //   modular   ModularFooter placement, row-group statistics, and page indexes.
-//   par1      page placement, row-group statistics, and flat Column Index.
-//   par3      page placement and row-range statistics.
+//   par1      chunk regions, flat Offset Index, row-group statistics, and flat
+//   Column Index. par3      page placement and row-range statistics.
 //
 // The parser is shared (thrift_codec.h) and each layout is a Resolver
 // (footer_formats.h), so the difference measured here is the footer layout.

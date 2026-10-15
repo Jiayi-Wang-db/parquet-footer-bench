@@ -6,7 +6,7 @@ The transition is split into two schemas:
 
 - [`PageFirstModularFooterAddendum.thrift`](PageFirstModularFooterAddendum.thrift) describes PAR1
   files. It is a small addendum to the current modular-footer proposal: row groups remain, while
-  placement and page indexes become page-first.
+  placement uses region ordinals and page indexes become flat per-column modules.
 - [`PageFirstModularFooterFull.thrift`](PageFirstModularFooterFull.thrift) describes PAR3 files.
   It removes row groups and column chunks, permits non-contiguous page layouts, and replaces both
   row-group and page statistics with one row-range statistics model.
@@ -14,11 +14,12 @@ The transition is split into two schemas:
 The two schemas deliberately make PAR1 versus PAR3 semantics explicit in the file magic. There is
 no optional field whose absence silently changes the interpretation of a PAR1 file.
 
-## Common page placement
+## Common region map
 
-Every complete serialized Parquet page, including its `PageHeader` and body, is exactly one
-physical region. Other independently addressable objects, gaps, extensions, and metadata modules
-may also be regions. Pages are never coalesced into one region.
+A region is an independently addressable physical byte interval. In PAR1, every complete column
+chunk is exactly one region and its pages are addressed relative to that region. In PAR3, every
+complete serialized Parquet page, including its `PageHeader` and body, is exactly one region.
+Gaps, extensions, and metadata modules may also be regions.
 
 For `R` regions, the common region map contains `R + 1` absolute file offsets:
 
@@ -30,10 +31,9 @@ region r = [region_offsets[r], region_offsets[r + 1])
 locates the root and region map directly; every other physical reference is a region ordinal.
 Readers decode and retain the region map before resolving page or module regions.
 
-The page directory contains one fixed-width packed `ColumnDataPages` region ordinal per leaf
-column. Selecting a column therefore does not read another column's page metadata. Within a
-selected column, the following arrays are sequential and align one-for-one with logical data
-pages:
+PAR3's page directory contains one descriptor region ordinal per leaf column. Selecting a column
+therefore does not read another column's page metadata. Within a selected column, its sequential
+arrays align one-for-one with logical data pages:
 
 ```text
 region_ordinals[]
@@ -54,8 +54,8 @@ A schema-present flat column with zero page entries is all-null over the file's 
 a convention, not another metadata field. Nested or repeated leaves may be omitted only when their
 definition and repetition structure remains reconstructible.
 
-The current Offset Index module disappears in both schemas: region ordinals provide physical page
-ranges and `first_row_indexes` provide logical page locations.
+PAR3 needs no Offset Index module: region ordinals provide physical page ranges and
+`first_row_indexes` provide logical page locations.
 
 ## PAR1 addendum
 
@@ -76,10 +76,26 @@ The addendum otherwise keeps the current modular proposal's schema, file-metadat
 and row-group `ColumnStatistics` structures. Statistics descriptors are addressed by region
 ordinal instead of byte offset.
 
+Each PAR1 column chunk is one region. The page directory contains one independently addressable
+descriptor per leaf column, with parallel chunk-region, page-count, uncompressed-size, value-count,
+codec, and dictionary-encoding arrays indexed by row-group ordinal. This keeps the always-read core
+at one entry per column chunk rather than one entry per page.
+
+The chunk-oriented Offset Index is replaced with one `FlatOffsetIndex` descriptor per participating
+leaf column. Its arrays contain data-page offsets relative to each chunk-region start and file-global
+first-row indexes. Prefix-summing the page counts gives each chunk's slice of these arrays. Page
+sizes are derived from the next relative offset or the chunk-region end.
+
 The chunk-oriented Column Index is replaced with one `FlatColumnIndex` descriptor per participating
-leaf column. Page arrays align with that column's complete `ColumnDataPages` sequence. Existing
-PAR1 chunks without a Column Index create sparse positions in those arrays. `boundary_orders`
-retains one value per row group because ordering may restart at every row-group boundary.
+leaf column. Page arrays align with that column's `FlatOffsetIndex` sequence. Existing PAR1 chunks
+without a Column Index create sparse positions in those arrays. `boundary_orders` retains one value
+per row group because ordering may restart at every row-group boundary.
+
+To locate a page for `(column, row)`, prefix-sum the top-level row-group counts to select the row
+group, decode that column's page directory, and read the selected chunk region and page count. The
+prefix sum of preceding page counts gives the chunk's first ordinal in the flat Offset Index. A
+search over that chunk's first-row slice selects the page; adding its relative offset to the chunk
+region start gives the physical page offset.
 
 In short:
 
@@ -88,7 +104,9 @@ current modular
   - column-chunk placement
   - chunk-oriented Offset Index
   - chunk-oriented Column Index
-  + page placement
+  + one region per column chunk
+  + per-column chunk placement and page counts
+  + flat per-column Offset Index
   + flat per-column Column Index
 ```
 
@@ -137,6 +155,13 @@ its own directories, region map, root, and framing. Fixed magic/length trailers 
 The source page-index ranges are non-overlapping and form one contiguous span immediately before
 the Thrift footer in all four files.
 
+| Dataset | Thrift core + stats | Thrift core + stats + indexes | Modular core | Modular core + stats | Modular core + stats + indexes | PAR1 core | PAR1 core + stats | PAR1 core + stats + indexes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| US Accidents | 14,079 B | 112,106 B | 8,919 B | 12,229 B | 82,490 B | 10,997 B | 14,276 B | 60,145 B |
+| FineWeb | 26,693 B | 159,589 B | 2,826 B | 6,653 B | 69,860 B | 2,698 B | 6,508 B | 45,416 B |
+| Hacker News | 6,380 B | 145,910 B | 3,317 B | 4,736 B | 38,058 B | 3,868 B | 5,266 B | 30,013 B |
+| Yellow Taxi | 5,183 B | 116,247 B | 2,942 B | 4,352 B | 98,573 B | 3,827 B | 5,241 B | 67,016 B |
+
 | Dataset | Thrift footer | Thrift full |
 | --- | ---: | ---: |
 | US Accidents | 14,079 B | 112,106 B |
@@ -153,14 +178,13 @@ the Thrift footer in all four files.
 
 | Dataset | PAR1 addendum core | Core + RG stats | vs Thrift footer | PAR1 addendum full | vs Thrift full |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| US Accidents | 26,311 B | 29,626 B | +110.4% | 70,224 B | −37.4% |
-| FineWeb | 29,205 B | 33,021 B | +23.7% | 58,043 B | −63.6% |
-| Hacker News | 12,632 B | 14,088 B | +120.8% | 34,185 B | −76.6% |
-| Yellow Taxi | 18,391 B | 19,791 B | +281.8% | 75,225 B | −35.3% |
+| US Accidents | 10,997 B | 14,276 B | +1.4% | 60,145 B | −46.4% |
+| FineWeb | 2,698 B | 6,508 B | −75.6% | 45,416 B | −71.5% |
+| Hacker News | 3,868 B | 5,266 B | −17.5% | 30,013 B | −79.4% |
+| Yellow Taxi | 3,827 B | 5,241 B | +1.1% | 67,016 B | −42.4% |
 
-PAR1 core already contains page-level placement, so its comparison with the chunk-oriented Thrift
-footer exposes the cost of richer placement. Full adds flat Column Index only; page placement has
-already subsumed Offset Index.
+PAR1 core uses one region per column chunk and per-column chunk descriptors. Full adds flat
+per-column Offset Index and Column Index modules.
 
 | Dataset | PAR3 core | Core + row-range stats | PAR3 full | vs Thrift full |
 | --- | ---: | ---: | ---: | ---: |
@@ -186,26 +210,27 @@ For one projected column, placement-only decode is:
 
 | Dataset | Thrift full | Current modular full | PAR1 addendum full | PAR3 full |
 | --- | ---: | ---: | ---: | ---: |
-| US Accidents | 70.870 µs/op | 0.803 µs/op | 3.656 µs/op | 3.438 µs/op |
-| FineWeb | 563.561 µs/op | 43.540 µs/op | 27.122 µs/op | 27.345 µs/op |
-| Hacker News | 51.653 µs/op | 0.806 µs/op | 2.224 µs/op | 2.249 µs/op |
-| Yellow Taxi | 53.315 µs/op | 2.262 µs/op | 3.986 µs/op | 3.828 µs/op |
+| US Accidents | 71.695 µs/op | 0.786 µs/op | 0.736 µs/op | 3.313 µs/op |
+| FineWeb | 518.593 µs/op | 35.475 µs/op | 9.613 µs/op | 25.629 µs/op |
+| Hacker News | 52.317 µs/op | 0.789 µs/op | 0.955 µs/op | 2.322 µs/op |
+| Yellow Taxi | 53.838 µs/op | 2.178 µs/op | 0.997 µs/op | 3.833 µs/op |
 
 Placement plus applicable statistics is:
 
 | Dataset | Thrift full | Current modular full | PAR1 addendum full | PAR3 full |
 | --- | ---: | ---: | ---: | ---: |
-| US Accidents | 82.465 µs/op | 2.896 µs/op | 4.897 µs/op | 4.987 µs/op |
-| FineWeb | 515.162 µs/op | 37.164 µs/op | 25.739 µs/op | 25.419 µs/op |
-| Hacker News | 55.464 µs/op | 2.463 µs/op | 2.999 µs/op | 2.569 µs/op |
-| Yellow Taxi | 65.205 µs/op | 6.784 µs/op | 5.692 µs/op | 5.274 µs/op |
+| US Accidents | 77.803 µs/op | 2.542 µs/op | 1.630 µs/op | 4.603 µs/op |
+| FineWeb | 519.678 µs/op | 35.710 µs/op | 9.943 µs/op | 25.645 µs/op |
+| Hacker News | 57.972 µs/op | 2.403 µs/op | 1.700 µs/op | 2.591 µs/op |
+| Yellow Taxi | 65.721 µs/op | 6.601 µs/op | 2.776 µs/op | 5.259 µs/op |
 
-The placement-only workload decodes projected Offset Index for current Thrift/current modular and
-projected page placement for page-first. The statistics workload additionally decodes projected
-Column Index; current modular and PAR1 also decode row-group statistics, while PAR3 decodes its
-row-range descriptor. FineWeb's first projected column has no Column Index or row-range descriptor,
-so its one-column statistics timing is nearly identical to placement. The checked-in CSVs include
-projection sweeps through all columns.
+The placement-only workload decodes projected Offset Index for current Thrift/current modular.
+PAR1 decodes its projected chunk directory and flat relative Offset Index; PAR3 decodes projected
+page placement. The statistics workload additionally decodes projected Column Index; current
+modular and PAR1 also decode row-group statistics, while PAR3 decodes its row-range descriptor.
+FineWeb's first projected column has no Column Index or row-range descriptor, so its one-column
+statistics timing is nearly identical to placement. The checked-in CSVs include projection sweeps
+through all columns.
 
 ## Open questions
 

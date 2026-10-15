@@ -133,24 +133,25 @@ One projected column, placement only:
 
 | Dataset | Thrift full | Current modular full | PAR1 addendum full | PAR3 full |
 | --- | ---: | ---: | ---: | ---: |
-| US Accidents | 70.870 µs/op | 0.803 µs/op | 3.656 µs/op | 3.438 µs/op |
-| FineWeb | 563.561 µs/op | 43.540 µs/op | 27.122 µs/op | 27.345 µs/op |
-| Hacker News | 51.653 µs/op | 0.806 µs/op | 2.224 µs/op | 2.249 µs/op |
-| Yellow Taxi | 53.315 µs/op | 2.262 µs/op | 3.986 µs/op | 3.828 µs/op |
+| US Accidents | 71.695 µs/op | 0.786 µs/op | 0.736 µs/op | 3.313 µs/op |
+| FineWeb | 518.593 µs/op | 35.475 µs/op | 9.613 µs/op | 25.629 µs/op |
+| Hacker News | 52.317 µs/op | 0.789 µs/op | 0.955 µs/op | 2.322 µs/op |
+| Yellow Taxi | 53.838 µs/op | 2.178 µs/op | 0.997 µs/op | 3.833 µs/op |
 
 One projected column, placement plus statistics:
 
 | Dataset | Thrift full | Current modular full | PAR1 addendum full | PAR3 full |
 | --- | ---: | ---: | ---: | ---: |
-| US Accidents | 82.465 µs/op | 2.896 µs/op | 4.897 µs/op | 4.987 µs/op |
-| FineWeb | 515.162 µs/op | 37.164 µs/op | 25.739 µs/op | 25.419 µs/op |
-| Hacker News | 55.464 µs/op | 2.463 µs/op | 2.999 µs/op | 2.569 µs/op |
-| Yellow Taxi | 65.205 µs/op | 6.784 µs/op | 5.692 µs/op | 5.274 µs/op |
+| US Accidents | 77.803 µs/op | 2.542 µs/op | 1.630 µs/op | 4.603 µs/op |
+| FineWeb | 519.678 µs/op | 35.710 µs/op | 9.943 µs/op | 25.645 µs/op |
+| Hacker News | 57.972 µs/op | 2.403 µs/op | 1.700 µs/op | 2.591 µs/op |
+| Yellow Taxi | 65.721 µs/op | 6.601 µs/op | 2.776 µs/op | 5.259 µs/op |
 
-Placement-only decodes projected Offset Index for current Thrift/current modular and projected page
-placement for page-first. The second workload also decodes projected Column Index; current modular
-and PAR1 decode row-group statistics, while PAR3 decodes row-range statistics. FineWeb's first
-column has no page statistics, so its one-column statistics timing is nearly its placement timing.
+Placement-only decodes projected Offset Index for current Thrift/current modular. PAR1 decodes its
+projected chunk directory and flat relative Offset Index; PAR3 decodes projected page placement.
+The second workload also decodes projected Column Index; current modular and PAR1 decode row-group
+statistics, while PAR3 decodes row-range statistics. FineWeb's first column has no page statistics,
+so its one-column statistics timing is nearly its placement timing.
 Every checked-in `*-split-{placement,statistics}.csv` contains projection sweeps through all
 columns. Files are already in memory and each operation is calibrated to roughly 200 ms; interpret
 the absolute latency as machine-specific.
