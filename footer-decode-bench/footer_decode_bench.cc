@@ -15,20 +15,22 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// footer_decode_bench -- footer decoding speed across four footer layouts, all
-// resolving the SAME information for a projection: per projected column chunk,
-// {data_page_offset, total_compressed_size, null_count, min, max} -- what a
-// scan + row-group-pruning reader needs. No IO, no page decode.
+// footer_decode_bench -- footer decoding speed across current and experimental
+// layouts. Placement-only resolves projected page locations; the default also
+// consumes each layout's applicable statistics. No IO, no page decode.
 //
 //   standard  full Thrift materialization (a generated-Thrift reader, e.g.
-//             parquet-java's): decode the whole FileMetaData into objects. Cost is
-//             projection-independent -- it decodes everything.
-//   walk      today's nested footer: walk every row group / column chunk, decode
+//             parquet-java's): decode the whole FileMetaData into objects. Cost
+//             is projection-independent -- it decodes everything.
+//   walk      today's nested footer: walk every row group / column chunk,
+//   decode
 //             the projected ones. O(all chunks).
-//   index     jump table (FileMetadataFooterIndex.column_chunk_offsets): seek to
+//   index     jump table (FileMetadataFooterIndex.column_chunk_offsets): seek
+//   to
 //             each projected chunk. O(projected).
-//   modular   ModularFooter: column-major bit-packed placement + a separate
-//             ColumnStatistics module. O(projected).
+//   modular   ModularFooter placement, row-group statistics, and page indexes.
+//   par1      chunk regions, flat Offset Index, row-group statistics, and flat
+//   Column Index. par3      page placement and row-range statistics.
 //
 // The parser is shared (thrift_codec.h) and each layout is a Resolver
 // (footer_formats.h), so the difference measured here is the footer layout.
@@ -36,10 +38,13 @@
 // Inputs (from the sibling converters):
 //   jumptable-footer/parquet_to_jumptable input.parquet input.jt.parquet
 //   modular-footer/parquet_to_modular     input.parquet input.modular
+//   modular-footer/parquet_to_page_modular.py --format addendum ...
+//   modular-footer/parquet_to_page_modular.py --format full ...
 //
 // Build & run:
 //   c++ -std=c++17 -O2 footer_decode_bench.cc -o footer_decode_bench
-//   ./footer_decode_bench input.jt.parquet [num_projected|--sweep] [input.modular]
+//   ./footer_decode_bench input.jt.parquet [num_projected|--sweep]
+//       [input.modular] [input.page-modular]
 
 #include <algorithm>
 #include <cctype>
@@ -85,27 +90,47 @@ std::vector<char> Mask(int C, int K) {
   return w;
 }
 
-double Time(const Resolver& r, const std::vector<char>& want) {
-  return TimeUs([&] { Placement p = r.Resolve(want); if (p.empty()) std::abort(); });
+double Time(const Resolver &r, const std::vector<char> &want,
+            bool include_stats) {
+  return TimeUs([&] {
+    Placement p = r.Resolve(want, include_stats);
+    if (p.empty())
+      std::abort();
+  });
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: %s file.jumptable.parquet [num_projected|--sweep] [file.modular]\n",
+    std::fprintf(stderr,
+                 "usage: %s file.jumptable.parquet [num_projected|--sweep] "
+                 "[--placement-only] "
+                 "[file.modular] [file.par1-addendum] [file.par3-full]\n",
                  argv[0]);
     return 2;
   }
   const std::string jt_path = argv[1];
   bool sweep = false;
+  bool include_stats = true;
   int proj = 1;
-  std::string mod_path;
+  std::string mod_path, addendum_path, full_path;
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--sweep") sweep = true;
+    else if (a == "--placement-only")
+      include_stats = false;
     else if (!a.empty() && std::isdigit(static_cast<unsigned char>(a[0]))) proj = std::atoi(a.c_str());
-    else mod_path = a;
+    else if (mod_path.empty())
+      mod_path = a;
+    else if (addendum_path.empty())
+      addendum_path = a;
+    else if (full_path.empty())
+      full_path = a;
+    else {
+      std::fprintf(stderr, "error: too many footer inputs\n");
+      return 2;
+    }
   }
 
   try {
@@ -122,34 +147,54 @@ int main(int argc, char** argv) {
     bool have_mod = !mod_path.empty();
     std::string mod;
     if (have_mod) mod = ReadWhole(mod_path);
+    bool have_addendum = !addendum_path.empty();
+    std::string addendum;
+    if (have_addendum)
+      addendum = ReadWhole(addendum_path);
+    bool have_full = !full_path.empty();
+    std::string full;
+    if (have_full)
+      full = ReadWhole(full_path);
 
     // Build the resolvers -- one uniform interface each.
     std::vector<std::unique_ptr<Resolver>> rs;
-    rs.push_back(std::make_unique<fdb::StandardResolver>(footer, C, G));
+    rs.push_back(std::make_unique<fdb::StandardResolver>(jt, footer, C, G));
     rs.push_back(std::make_unique<fdb::WalkResolver>(footer, C, G));   // index 1 = walk baseline
     rs.push_back(std::make_unique<fdb::IndexResolver>(footer, fi));
     if (have_mod) rs.push_back(std::make_unique<fdb::ModularResolver>(mod, C, G));
+    if (have_addendum || have_full) {
+      std::vector<int64_t> range_ends = fdb::ReadRowGroupEnds(footer);
+      if (have_addendum)
+        rs.push_back(std::make_unique<fdb::PageResolver>(addendum, C, G, true,
+                                                         range_ends));
+      if (have_full)
+        rs.push_back(
+            std::make_unique<fdb::PageResolver>(full, C, G, true, range_ends));
+    }
     const size_t WALK = 1;
 
     // Fidelity: every resolver must agree with the walk on placement + stats.
     for (const std::vector<char>& want : {Mask(C, std::min(std::max(proj, 1), C)), Mask(C, C)}) {
-      Placement ref = rs[WALK]->Resolve(want);
+      Placement ref = rs[WALK]->Resolve(want, false);
       for (const auto& r : rs)
-        if (r->Resolve(want) != ref)
-          throw std::runtime_error(r->name() + " disagrees with walk on placement+stats");
+        if (r->Resolve(want, false) != ref)
+          throw std::runtime_error(r->name() +
+                                   " disagrees with walk on placement");
     }
 
     if (sweep) {
       std::vector<int> ks;
       for (int k = 1; k < C; k *= 2) ks.push_back(k);
       ks.push_back(C);
-      std::printf("projected");
-      for (const auto& r : rs) std::printf(",%s_us", r->name().c_str());
+      std::printf("projected_count");
+      for (const auto &r : rs)
+        std::printf(",%s_us_per_op", r->name().c_str());
       std::printf("\n");
       for (int K : ks) {
         std::vector<char> want = Mask(C, K);
         std::printf("%d", K);
-        for (const auto& r : rs) std::printf(",%.3f", Time(*r, want));
+        for (const auto &r : rs)
+          std::printf(",%.3f", Time(*r, want, include_stats));
         std::printf("\n");
       }
       return 0;
@@ -158,17 +203,32 @@ int main(int argc, char** argv) {
     const int K = std::max(1, std::min(proj, C));
     std::vector<char> want_proj = Mask(C, K), want_all = Mask(C, C);
     std::vector<double> tp(rs.size()), ta(rs.size());
-    for (size_t i = 0; i < rs.size(); ++i) { tp[i] = Time(*rs[i], want_proj); ta[i] = Time(*rs[i], want_all); }
+    for (size_t i = 0; i < rs.size(); ++i) {
+      tp[i] = Time(*rs[i], want_proj, include_stats);
+      ta[i] = Time(*rs[i], want_all, include_stats);
+    }
 
     std::printf("jumptable file  %s  (footer %u B)\n", jt_path.c_str(), flen);
     if (have_mod) std::printf("modular file    %s  (%zu B)\n", mod_path.c_str(), mod.size());
+    if (have_addendum)
+      std::printf("PAR1 addendum   %s  (%zu B)\n", addendum_path.c_str(),
+                  addendum.size());
+    if (have_full)
+      std::printf("PAR3 full       %s  (%zu B)\n", full_path.c_str(),
+                  full.size());
     std::printf("columns %d   row_groups %d   column_chunks %d   projected %d of %d\n",
                 C, G, C * G, K, C);
-    std::printf("info per chunk  {data_page_offset, total_compressed_size, null_count, min, max}\n\n");
-    std::printf("%-10s %14s %14s %14s\n", "resolve", "projected_us", "all_us", "proj vs walk");
+    if (include_stats)
+      std::printf("info per chunk  {data_page_offset, total_compressed_size, "
+                  "null_count, min, max}\n\n");
+    else
+      std::printf(
+          "info per chunk  {data_page_offset, total_compressed_size}\n\n");
+    std::printf("%-10s %20s %20s %14s\n", "resolve", "projected_us/op",
+                "all_us/op", "vs_walk_x");
     for (size_t i = 0; i < rs.size(); ++i)
-      std::printf("%-10s %14.3f %14.3f %13.1fx\n", rs[i]->name().c_str(), tp[i], ta[i],
-                  tp[i] > 0 ? tp[WALK] / tp[i] : 0.0);
+      std::printf("%-10s %20.3f %20.3f %13.1fx\n", rs[i]->name().c_str(), tp[i],
+                  ta[i], tp[i] > 0 ? tp[WALK] / tp[i] : 0.0);
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "error: %s\n", e.what());

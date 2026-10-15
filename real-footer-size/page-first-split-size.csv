@@ -1,0 +1,5 @@
+name,column_chunks_count,offset_indexed_chunks_count,column_indexed_chunks_count,data_pages_count,dictionary_pages_count,current_thrift_footer_bytes,current_thrift_full_bytes,current_modular_core_bytes,current_modular_core_stats_bytes,current_modular_full_bytes,par1_addendum_core_bytes,par1_addendum_core_stats_bytes,par1_addendum_full_bytes,par3_full_core_bytes,par3_full_core_stats_bytes,par3_full_full_bytes
+us-accidents-00004-of-00007,46,46,46,2620,26,14079,112106,8919,12229,82490,10997,14276,60145,26286,61586,61586
+fineweb-10bt-000,99,99,88,3513,44,26693,159589,2826,6653,69860,2698,6508,45416,29071,52466,52466
+hacker-news-00000-of-00039,28,28,28,1022,12,6380,145910,3317,4736,38058,3868,5266,30013,12561,32148,32148
+yellow-tripdata-2025-01,20,20,20,3480,20,5183,116247,2942,4352,98573,3827,5241,67016,18366,61647,61647

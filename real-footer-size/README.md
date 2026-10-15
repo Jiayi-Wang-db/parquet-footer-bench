@@ -73,7 +73,7 @@ than estimated.
 
 Current results with a 16-byte suffix limit:
 
-| dataset | standard | no path | prefix + suffix16 | modular |
+| dataset | standard (bytes) | no path (bytes) | prefix + suffix16 (bytes) | modular (bytes) |
 |---|---:|---:|---:|---:|
 | US Accidents | 4,747,144 | 4,080,829 | 3,616,584 | 1,765,233 |
 | FineWeb 10BT | 3,971,883 | 3,881,669 | 1,408,067 | 531,503 |
@@ -84,8 +84,99 @@ The comparison excludes page indexes. Standard Parquet stores its page-index blo
 footer, while the modular representation embeds them in modules, so including them on only one
 side would not be an apples-to-apples footer-size comparison.
 
-Both prefix-based representations cap each min/max suffix at the configured limit (16 bytes in the
-table), so their statistics policies are directly comparable.
+## Page-first modular footer
+
+The [design notes](../modular-footer/PageFirstModularFooter.md) split the transition into
+[`PageFirstModularFooterAddendum.thrift`](../modular-footer/PageFirstModularFooterAddendum.thrift)
+for PAR1 and [`PageFirstModularFooterFull.thrift`](../modular-footer/PageFirstModularFooterFull.thrift)
+for PAR3. Both use an always-read DBP region map. PAR1 uses one region per column chunk, per-column
+chunk descriptors with page counts, and flattened per-column Offset Index and Column Index modules.
+It retains required row-group arrays and row-group statistics. PAR3 has per-column page placement,
+no row groups or page-index modules, and uses row-range statistics.
+
+These measurements use files produced by Raincloud commit `7357517`'s actual parquet-java 1.17.1
+sidecar target. The target defaults to ZSTD, a 128 MiB encoded row-group target, 1 MiB pages, a
+20,000-row page limit, dictionaries, statistics, checksums, and page indexes. Every output
+self-verified against its canonical Arrow input. Offset Index covers every chunk; Column Index
+covers 88 of FineWeb's 99 chunks and every chunk in the other three files.
+
+After building Raincloud's `:parquet-java:installDist` target, regenerate the corpus with:
+
+```sh
+python3 real-footer-size/rewrite_with_raincloud_parquet_java.py \
+  --writer /path/to/raincloud-export-parquet-java
+```
+
+```sh
+python3 modular-footer/parquet_to_page_modular.py \
+  --format addendum \
+  real-footer-size/data/raincloud-parquet-java/yellow-tripdata-2025-01.parquet \
+  /tmp/yellow.addendum
+
+python3 real-footer-size/page_first_split_size.py
+```
+
+The comparison script reports five semantic tiers:
+
+1. **Thrift footer:** literal `FileMetaData`, including page-index pointers but not their blobs;
+2. **Thrift full:** the Thrift footer plus external Offset Index and Column Index blobs;
+3. **modular core:** framing, file metadata, schema, and placement;
+4. **modular core + stats:** core plus row-group or row-range statistics; and
+5. **modular full:** all applicable page placement and page statistics.
+
+The page-index blobs are stored outside the Thrift footer and addressed by its column-chunk
+metadata. Adding their serialized lengths to the footer length measures their total metadata cost;
+it does not generally assume one physically contiguous byte range. In these four parquet-java
+files, all index ranges are non-overlapping and collectively form one contiguous span ending
+exactly where the Thrift footer begins, so the sum also equals the physical index span.
+
+All modular statistics use a 16-byte min/max suffix limit. Each tier is serialized independently,
+so its directory, region map, root, and framing reflect only its included modules. Fixed
+magic/length trailers are excluded consistently.
+
+| Dataset | Thrift core + stats | Thrift core + stats + indexes | Modular core | Modular core + stats | Modular core + stats + indexes | PAR1 core | PAR1 core + stats | PAR1 core + stats + indexes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| US Accidents | 14,079 B | 112,106 B | 8,919 B | 12,229 B | 82,490 B | 10,997 B | 14,276 B | 60,145 B |
+| FineWeb | 26,693 B | 159,589 B | 2,826 B | 6,653 B | 69,860 B | 2,698 B | 6,508 B | 45,416 B |
+| Hacker News | 6,380 B | 145,910 B | 3,317 B | 4,736 B | 38,058 B | 3,868 B | 5,266 B | 30,013 B |
+| Yellow Taxi | 5,183 B | 116,247 B | 2,942 B | 4,352 B | 98,573 B | 3,827 B | 5,241 B | 67,016 B |
+
+| Dataset | Thrift footer | Thrift full |
+| --- | ---: | ---: |
+| US Accidents | 14,079 B | 112,106 B |
+| FineWeb | 26,693 B | 159,589 B |
+| Hacker News | 6,380 B | 145,910 B |
+| Yellow Taxi | 5,183 B | 116,247 B |
+
+| Dataset | Current modular core | Core + RG stats | vs Thrift footer | Current modular full | vs Thrift full |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| US Accidents | 8,919 B | 12,229 B | −13.1% | 82,490 B | −26.4% |
+| FineWeb | 2,826 B | 6,653 B | −75.1% | 69,860 B | −56.2% |
+| Hacker News | 3,317 B | 4,736 B | −25.8% | 38,058 B | −73.9% |
+| Yellow Taxi | 2,942 B | 4,352 B | −16.0% | 98,573 B | −15.2% |
+
+| Dataset | PAR1 addendum core | Core + RG stats | vs Thrift footer | PAR1 addendum full | vs Thrift full |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| US Accidents | 10,997 B | 14,276 B | +1.4% | 60,145 B | −46.4% |
+| FineWeb | 2,698 B | 6,508 B | −75.6% | 45,416 B | −71.5% |
+| Hacker News | 3,868 B | 5,266 B | −17.5% | 30,013 B | −79.4% |
+| Yellow Taxi | 3,827 B | 5,241 B | +1.1% | 67,016 B | −42.4% |
+
+PAR1 core uses one region per column chunk and per-column chunk descriptors. PAR1 full adds flat
+per-column Offset Index and Column Index modules.
+
+| Dataset | PAR3 core | Core + row-range stats | PAR3 full | vs Thrift full |
+| --- | ---: | ---: | ---: | ---: |
+| US Accidents | 26,286 B | 61,586 B | 61,586 B | −45.1% |
+| FineWeb | 29,071 B | 52,466 B | 52,466 B | −67.1% |
+| Hacker News | 12,561 B | 32,148 B | 32,148 B | −78.0% |
+| Yellow Taxi | 18,366 B | 61,647 B | 61,647 B | −47.0% |
+
+PAR3 core + stats and full are identical: page placement subsumes Offset Index and page-granular
+row-range statistics subsume Column Index. This tier is therefore compared with Thrift full.
+
+The machine-readable output is in `page-first-split-size.csv`. `--full-file` preserves the data
+prefix and emits `PMA1` or `PMF3`; the default writes metadata only for size analysis.
 
 ## Component breakdown
 
@@ -109,7 +200,7 @@ The last column above combines two effects. Running with an effectively unlimite
 the common-prefix representation; comparing that result with the 16-byte result isolates the
 additional effect of truncation:
 
-| dataset | no path | prefix, untruncated | prefix + suffix16 | prefix saving | truncation saving |
+| dataset | no path (bytes) | prefix, untruncated (bytes) | prefix + suffix16 (bytes) | prefix saving (bytes) | truncation saving (bytes) |
 |---|---:|---:|---:|---:|---:|
 | US Accidents | 4,080,829 | 3,744,296 | 3,616,584 | 336,533 | 127,712 |
 | FineWeb 10BT | 3,881,669 | 3,784,175 | 1,408,067 | 97,494 | 2,376,108 |
