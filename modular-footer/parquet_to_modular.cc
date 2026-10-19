@@ -807,12 +807,14 @@ static std::string BuildSchemaIndex(const SchemaLayout& sl, int64_t elements_bas
 int main(int argc, char** argv) {
   std::vector<std::string> pos;
   bool emit_pi = false;
+  bool emit_stats = true;
   bool emit_full_file = false;
   bool emit_si = false;  // schema index: opt-in, off by default
   int trunc = 0;  // max min/max suffix bytes; 0 = no truncation
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--page-index" || a == "-p") emit_pi = true;
+    else if (a == "--no-statistics") emit_stats = false;
     else if (a == "--full-file") emit_full_file = true;
     else if (a == "--schema-index" || a == "-s") emit_si = true;
     else if (a == "--truncate-minmax") trunc = 16;
@@ -821,7 +823,7 @@ int main(int argc, char** argv) {
   }
   if (pos.empty()) {
     std::fprintf(stderr,
-        "usage: %s [--page-index] [--full-file] [--schema-index] "
+        "usage: %s [--page-index] [--no-statistics] [--full-file] [--schema-index] "
         "[--truncate-minmax[=N]] input.parquet [output.modular]\n",
         argv[0]);
     return 2;
@@ -928,9 +930,11 @@ int main(int argc, char** argv) {
     // by a column_offsets directory (absolute offsets into the output buffer).
     std::vector<std::string> col_desc(C);
     bool have_stats = false;
-    for (int c = 0; c < C; ++c) {
-      col_desc[c] = BuildColumnStatistics(fm, c, G, trunc);
-      if (!col_desc[c].empty()) have_stats = true;
+    if (emit_stats) {
+      for (int c = 0; c < C; ++c) {
+        col_desc[c] = BuildColumnStatistics(fm, c, G, trunc);
+        if (!col_desc[c].empty()) have_stats = true;
+      }
     }
 
     // ---- Lay out the output and collect the directory. Core sections are

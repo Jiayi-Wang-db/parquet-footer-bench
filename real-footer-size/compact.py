@@ -67,6 +67,8 @@ class Reader:
             element_type = header & 0x0f
             if size == 15:
                 size = self.varint()
+            if element_type in (BOOL_TRUE, BOOL_FALSE):
+                return element_type, [self.byte() == BOOL_TRUE for unused in range(size)]
             return element_type, [self.value(element_type) for unused in range(size)]
         if value_type == MAP:
             size = self.varint()
@@ -175,6 +177,13 @@ def decode(data):
     if reader.offset != len(data):
         raise DecodeError("{} trailing bytes".format(len(data) - reader.offset))
     return result
+
+
+def decode_prefix(data):
+    """Decode one leading compact-Thrift struct and return it with bytes consumed."""
+    reader = Reader(data)
+    result = reader.struct()
+    return result, reader.offset
 
 
 def encode(fields):
