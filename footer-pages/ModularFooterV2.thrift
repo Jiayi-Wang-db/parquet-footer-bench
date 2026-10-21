@@ -1,19 +1,15 @@
-/** Paired-bound chunk-region footer proposal (version 19).
- * [source data][independently protected metadata streams and column-statistics blocks]
- * [FileMetaData root, protected according to FooterEnvelope crypto metadata]
- * [Compact-Thrift FooterEnvelope][u64 LE absolute envelope offset][PAR3]
- * FooterEnvelope is plaintext and bootstraps the footer key before decryption.
- * PAR3 is identical in all modes; optional crypto metadata signals protection.
- * The footer key protects the small root and each shared stream independently.
- * Layout and location stream values retain version-10 semantics.
- * Dictionary encoding flags are per chunk, alongside dictionary-region references.
- * PageMetadata explicitly covers every data page; there is no column selector.
- * Grouping changes the root wire layout; decode according to version.
- * Histograms are removed and bound exactness is paired. Encrypted statistics are optional.
- * Plaintext and decrypted column statistics support lists of independent granularities.
- * RangeStatistics contains only per-range streams; column mapping belongs to its wrapper.
- * Null and NaN presence use nullable BOOLEAN streams instead of exact counts.
- * Measured results use PairedBoundsFooterPagesMeasured.thrift (version 12).
+/** Modular Footer V2 stores metadata arrays as typed Parquet page streams.
+ * A compact FileMetaData directory locates streams for data placement, page indexes,
+ * statistics and key/value metadata. Field IDs define each stream's physical type
+ * and nullability, so metadata streams need no separate schema.
+ *
+ * FileInfo holds the source-data schema, row/column counts and writer information,
+ * stored either in plaintext or encrypted with the footer key. Shared streams are
+ * protected independently, allowing readers to fetch only the metadata they need.
+ * Column statistics can use separate column keys and multiple row-range granularities.
+ *
+ * The directory remains readable and is authenticated in protected files.
+ * A fixed trailer locates FileMetaData; all protection modes use PAR3.
  */
 include "../modular-footer/parquet.thrift"
 
@@ -23,7 +19,7 @@ namespace py paired_bounds_footer_pages
 
 /** Standard PageHeader + body pairs: [optional DICTIONARY_PAGE][DATA_PAGE_V2 ...].
  * No specialized page header. Field IDs imply physical types and nullability.
- * Shared streams inherit FooterEnvelope protection: plaintext, independently signed,
+ * Shared streams inherit FileMetaData protection: plaintext, independently signed,
  * or independently encrypted with the footer key, including headers and dictionaries.
  * Inside ColumnRowRangeStatistics, streams are plaintext within its encrypted module.
  */
@@ -92,7 +88,7 @@ struct DataLocation {
 
 struct RowGroupMetadata {
   /** INT64, required, G entries, storing row counts in row-group order.
-    * Counts sum to FileMetaData.num_rows.
+    * Counts sum to FileInfo.num_rows.
     */
   1: required StreamLocation row_group_num_rows;
 
@@ -146,8 +142,8 @@ struct PageMetadata {
  */
 struct RangeStatistics {
   /** INT64, required, S entries, storing absolute first-row indexes.
-    * For a column with ranges, starts begin at 0 and strictly increase below FileMetaData.num_rows.
-    * A range ends at the next start for the same column, or FileMetaData.num_rows.
+    * For a column with ranges, starts begin at 0 and strictly increase below FileInfo.num_rows.
+    * A range ends at the next start for the same column, or FileInfo.num_rows.
     */
   1: required StreamLocation range_start_rows;
 
@@ -189,8 +185,8 @@ struct RangeStatistics {
 }
 
 /** One shared granularity across C columns, with S ranges in total.
- * Referenced from FileMetaData; each shared stream inherits FooterEnvelope protection.
- * A column with ranges partitions [0, FileMetaData.num_rows).
+ * Referenced from FileMetaData; each shared stream inherits its protection mode.
+ * A column with ranges partitions [0, FileInfo.num_rows).
  * A column may have ranges in one granularity and none in another.
  * Columns with independent encrypted statistics have no ranges in any shared granularity.
  */
@@ -217,7 +213,7 @@ struct ColumnIndexedRangeStatistics {
 
 /** Plaintext of one encrypted column-statistics module; Compact-Thrift serialized.
  * Every range belongs to the column identified by EncryptedColumnRowRangeStatistics.column_ordinal.
- * Each list entry has its own S ranges partitioning [0, FileMetaData.num_rows).
+ * Each list entry has its own S ranges partitioning [0, FileInfo.num_rows).
  * There is no column_range_starts; range_start_rows uses absolute file row indexes.
  * Only the column's physical-type bound stream may be present, with 2S entries.
  * Every StreamLocation.offset below is relative to page_streams, not the footer or file.
@@ -244,19 +240,19 @@ struct ColumnRowRangeStatistics {
 
 /** One independently encrypted module for one physical column across the file. */
 struct EncryptedColumnRowRangeStatistics {
-  /** Physical leaf-column ordinal in FileMetaData.schema; 0 <= column_ordinal < C. */
+  /** Physical leaf-column ordinal in FileInfo.schema; 0 <= column_ordinal < C. */
   1: required i32 column_ordinal;
 
   /** Exactly one PME key selector; no raw key material.
     * ENCRYPTION_WITH_COLUMN_KEY: path_in_schema must match column_ordinal;
     * resolve that column's DEK using its key metadata.
-    * ENCRYPTION_WITH_FOOTER_KEY: use the footer DEK resolved from FooterEnvelope.
+    * ENCRYPTION_WITH_FOOTER_KEY: use the footer DEK resolved from FileMetaData.crypto_metadata.
     * One selected key applies across all granularities and row groups for this column.
     */
   2: required parquet.ColumnCryptoMetaData crypto_metadata;
 
   /** Absolute file offset of the encrypted module's length prefix.
-    * The block ends before FooterEnvelope.root_offset and is disjoint from shared streams.
+    * The block precedes FileMetaData and is disjoint from shared streams.
     */
   3: required i64 offset;
 
@@ -282,23 +278,57 @@ struct EncryptedRowRangeStatistics {
   1: required list<EncryptedColumnRowRangeStatistics> columns;
 }
 
-/** Optional groups contain their required shared indexes and arrays together.
+/** Small inline metadata; stored once, either plaintext or encrypted with the footer key. */
+struct FileInfo {
+  1: required i32 num_columns; // Physical columns.
+  2: required i64 num_rows;
+  3: required list<parquet.SchemaElement> schema;
+  4: optional string created_by;
+}
+
+/** Stream directory, with two alternatives for the inline file information.
+ * The directory and column-key descriptors remain visible in every mode.
+ * Optional groups contain their required shared indexes and arrays together.
  * PageMetadata contains row positions for all P data pages when present.
  * If absent, read data pages to determine their row positions.
  * Relative byte offsets remain independently optional in DataLocation.
+ *
+ * File layout: [source data][metadata streams and column-statistics blocks]
+ * [Compact-Thrift FileMetaData][28-byte signature when crypto_metadata is present]
+ * [u64 LE absolute FileMetaData offset][PAR3].
+ *
+ * Authenticate the exact serialized FileMetaData bytes before trusting this directory
+ * or decrypting encrypted_file_info. Its signature is nonce12 + GCM-tag16, computed
+ * by encrypting these bytes and discarding the ciphertext, as in PME signing.
+ * Every signing/encryption invocation uses a fresh nonce under its key.
+ *
+ * AAD uses the PME file AAD (prefix + aad_file_unique) and distinct module types:
+ *   directory: file AAD + NEW_FOOTER_DIRECTORY_TYPE + LE32(version).
+ *   FileInfo: file AAD + NEW_FILE_INFO_TYPE + LE32(version).
+ *   stream: file AAD + NEW_METADATA_STREAM_TYPE + LE32(version) + LE32(path length)
+ *           + LE32(each path component) + LE64(offset) + LE64(length) + LE32(codec).
+ *   column stats: file AAD + NEW_ROW_RANGE_STATISTICS_TYPE + LE32(version) + LE32(column ordinal).
+ * Stream paths contain Thrift field IDs and zero-based list positions from FileMetaData;
+ * for example [3,1] identifies column_chunk_index, and [8,g,2,7] identifies
+ * granularity g's min_max_int32. The schema distinguishes field IDs from list positions.
+ * Numeric module-type allocations are pending; do not reuse existing PME module IDs.
+ *
+ * Shared streams and column blocks must precede this struct and be nonoverlapping.
+ * Verify each selected stream before parsing its pages. Enforce the caller's expected
+ * protection policy; stripping crypto metadata must not downgrade an encrypted file.
  */
 struct FileMetaData {
-  1: required i32 version; // 19; must equal FooterEnvelope.version.
-  2: required i32 num_columns; // Physical columns.
-  3: required i64 num_rows;
-  4: required list<parquet.SchemaElement> schema;
+  1: required i32 version; // 21.
 
-  5: required DataLayout data_layout;
-  6: required DataLocation data_location;
+  /** Exactly one of file_info and encrypted_file_info must be present. */
+  2: optional FileInfo file_info;
 
-  7: optional RowGroupMetadata row_group_metadata;
-  8: required ColumnChunkMetadata column_chunk_metadata;
-  9: optional PageMetadata page_metadata;
+  3: required DataLayout data_layout;
+  4: required DataLocation data_location;
+
+  5: optional RowGroupMetadata row_group_metadata;
+  6: required ColumnChunkMetadata column_chunk_metadata;
+  7: optional PageMetadata page_metadata;
   /** Independent granularities, usually row-group and page-level statistics.
     * Each entry has its own indexes, row boundaries and S; there is no two-entry limit.
     * Writers should order coarse to fine; boundaries need not nest across entries.
@@ -306,50 +336,28 @@ struct FileMetaData {
     * Counts from overlapping granularities must not be added together.
     * Omit entries with no ranges, and omit the list when no shared statistics exist.
     */
-  10: optional list<ColumnIndexedRangeStatistics> row_range_statistics;
+  8: optional list<ColumnIndexedRangeStatistics> row_range_statistics;
 
-  11: optional string created_by;
-  12: optional StreamLocation key_value_metadata_keys; // BYTE_ARRAY, required.
-  13: optional StreamLocation key_value_metadata_values; // BYTE_ARRAY, nullable.
+  9: optional StreamLocation key_value_metadata_keys; // BYTE_ARRAY, required.
+  10: optional StreamLocation key_value_metadata_values; // BYTE_ARRAY, nullable.
+
+  /** Plaintext algorithm/AAD parameters and opaque footer-key retrieval metadata, never a raw key.
+    * Absent: file_info and shared streams are plaintext; no footer signature.
+    * Present with file_info: shared streams each have a 28-byte signature.
+    * Present with encrypted_file_info: shared streams each use footer-key AES-GCM.
+    * In BOTH protected modes, a 28-byte signature follows serialized FileMetaData,
+    * authenticating the complete directory, crypto metadata and inline alternative.
+    * Missing key_metadata means external key resolution; aad_file_unique is required.
+    * Metadata uses AES-GCM under both PME algorithms; supply any requested external AAD prefix.
+    */
+  11: optional parquet.FileCryptoMetaData crypto_metadata;
+
+  /** Serialized FileInfo encrypted with the footer key; requires crypto_metadata.
+    * PME module: 4-byte LE length (excluding itself), 12-byte nonce, ciphertext, 16-byte GCM tag.
+    * Thrift's binary field delimits this inline value; no root offset or length is needed.
+    */
+  12: optional binary encrypted_file_info;
 
   /** Independently encrypted statistics; disjoint from shared row_range_statistics. */
-  14: optional EncryptedRowRangeStatistics encrypted_row_range_statistics;
-}
-
-/** Plaintext bootstrap; exactly fills the bytes between its trailer locator and the trailer.
- * Read before the small root; authenticate its exact serialized bytes as root AAD.
- * The final 12 bytes are [u64 LE absolute FooterEnvelope offset][PAR3].
- * No encryption-specific magic or magic-bit test. Presence of encryption_metadata
- * means encrypted; signing_metadata means signed plaintext; neither means plaintext.
- * Both cannot be present. Independent encrypted statistics require one of them.
- * Version 19 protects the root and shared streams separately; older readers cannot read it.
- * See ENCRYPTED-ROW-RANGE-STATS.md for AAD allocation and validation rules.
- */
-struct FooterEnvelope {
-  1: required i32 version; // 19.
-
-  /** Absolute file offset of the small FileMetaData root. Shared streams precede it. */
-  2: required i64 root_offset;
-
-  /** Total stored bytes, ending before this envelope:
-    * PLAINTEXT: serialized FileMetaData.
-    * SIGNED: serialized FileMetaData + 12-byte nonce + 16-byte GCM tag.
-    * ENCRYPTED: 4-byte LE length + 12-byte nonce + encrypted FileMetaData + 16-byte GCM tag.
-    * The encrypted length prefix excludes its own four bytes.
-    */
-  3: required i64 root_length;
-
-  /** Presence means the root and each shared stream are independently encrypted with the footer key.
-    * Reuses PME algorithm, AAD parameters and footer-key retrieval metadata only.
-    * Key metadata absence means external key resolution; aad_file_unique is required.
-    * A requested caller-supplied AAD prefix must be provided before authentication.
-    * Metadata always uses AES-GCM under both PME algorithms.
-    */
-  4: optional parquet.FileCryptoMetaData encryption_metadata;
-
-  /** Presence means the plaintext root and each shared stream have individual 28-byte signatures.
-    * Uses the footer signing key and the same PME metadata rules as above.
-    * Mutually exclusive with encryption_metadata; contains no raw keys.
-    */
-  5: optional parquet.FileCryptoMetaData signing_metadata;
+  13: optional EncryptedRowRangeStatistics encrypted_row_range_statistics;
 }
