@@ -1,0 +1,5 @@
+name,thrift_core_bytes,thrift_core_plus_rg_stats_bytes,thrift_core_plus_page_indexes_bytes,modular_core_bytes,modular_core_plus_rg_stats_bytes,modular_core_plus_rg_stats_page_indexes_bytes,addendum_core_bytes,addendum_core_with_rg_stats_as_row_ranges_bytes,addendum_core_with_page_stats_as_row_ranges_rg_fallback_offset_index_bytes,experimental_flat_arrays_core_bytes,experimental_flat_arrays_with_rg_stats_as_row_ranges_bytes,experimental_flat_arrays_with_page_stats_as_row_ranges_rg_fallback_offset_index_bytes
+us-accidents-00004-of-00007,14079,14079,112106,8919,12229,82490,11416,13690,52052,12286,15026,59988
+fineweb-10bt-000,26693,26693,159589,2826,6653,69860,3179,6390,40268,6218,11382,45945
+hacker-news-00000-of-00039,6380,6380,145910,3317,4736,38058,4075,5169,27752,6803,9306,33355
+yellow-tripdata-2025-01,5183,5183,116247,2942,4352,98573,4076,5057,53780,6381,8673,58893
