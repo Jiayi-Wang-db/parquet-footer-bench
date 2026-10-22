@@ -1,12 +1,26 @@
 # Modular Footer V2 playground
 
-This playground compares three representations of the same Java-written Parquet file's metadata: the current Parquet footer, the modular footer, and Modular Footer V2. It measures complete serialized metadata size and the CPU time to access metadata for selected columns.
+Use this guide to generate fresh Java-written Parquet inputs, understand the footer layouts, and compare metadata size and decoding cost. Every comparison starts from the same source file. Decoding timings use **uncompressed metadata**; compressed sizes are reported separately.
 
-Start with UCI Adult to check the source-data pipeline. Use Kepler Time Series to explore wide schemas, BI-Wins and BI-USCensus for wide schemas with multiple row groups, and ClickBench for many data pages. Source generation uses Raincloud's explicit **`parquet@java`** exporter. Metadata decoding benchmarks use **uncompressed metadata**; compressed sizes are a separate comparison.
+1. [What Modular Footer V2 is](#1-what-modular-footer-v2-is)
+2. [Run Raincloud with the Java writer](#2-run-raincloud-with-the-java-writer)
+3. [Datasets explored and their file information](#3-datasets-explored-and-their-file-information)
+4. [Define the four size levels](#4-define-the-four-size-levels)
+5. [Encoding and decoding implementations](#5-encoding-and-decoding-implementations)
+6. [Run decoding tests](#6-run-decoding-tests)
+7. [Save and compare results](#7-save-and-compare-results)
 
-This repository provides the V2 definition, a [layout visualization](data-location-visualization.html), and baseline benchmark tools. The Raincloud instructions below produce fresh Java-written inputs. The optimized V2 benchmark harness is not packaged in this repository; its codec requirements and measurement protocol are specified below.
+This repository includes the [V2 definition](ModularFooterV2.thrift), a [layout visualization](data-location-visualization.html), and baseline benchmark tools. The Raincloud and baseline commands below are runnable from those sources. The optimized V2 harness is a separate dependency; section 5 identifies the implementations it needs.
 
-## 1. What we have defined
+## 1. What Modular Footer V2 is
+
+Modular Footer V2 replaces nested metadata records with flattened, typed arrays encoded as Parquet pages. A small Thrift directory lets the reader find the streams needed for the selected columns. We compare it with both the current Parquet footer and the original modular layout:
+
+| Format | Representation in the matched experiment |
+|---|---|
+| Current | Standard Compact-Thrift metadata, reserialized for each scope; required external page-index payloads included. |
+| [Modular](../modular-footer/ModularFooter.thrift) | Schema/placement/statistics/index modules, packed arrays and shared min/max prefixes, choosing the smaller valid dense-bitmap or sparse-present-index representation per array. |
+| Modular Footer V2 | Version-21 typed page streams, with encodings/page capacities selected by measured stored size. Report uncompressed and selective-Zstd variants separately. |
 
 The authoritative definition is [ModularFooterV2.thrift](ModularFooterV2.thrift), version **21**.
 
@@ -54,11 +68,13 @@ end   = region_offsets[r] + relative_page_offsets[p+1]  if another page follows 
 
 The index differences give chunk/page counts; separate count arrays are unnecessary. For example, `column_chunk_index = [0,2,3]` means column 0 has two chunks and column 1 has one. `page_index = [0,3,4,6]` means those chunks have three, one, and two pages. Finding a page containing a known row also needs page-row positions; byte locations alone do not answer that question.
 
-### Statistics and encryption
+### Row-range statistics
 
 Each statistics-list entry describes one independent granularity. The main experiment uses row-group ranges, then adds page ranges in the most complete scenario. The format permits other boundaries and more than two granularities. Within one granularity, a column's ranges partition its rows. Equal adjacent `column_range_starts` entries mean the column has no statistics in that granularity and contributes no per-range values. Missing statistics mean unknown.
 
 Bounds are `[min_0, max_0, min_1, max_1, ...]`, in separate nullable streams by physical type. A range contributes nulls to other physical-type streams. Null-presence, NaN-presence, and all-null flags support pruning; they do not retain exact null counts for aggregate queries. Histograms and column-order descriptors are absent from V2. Boundary order belongs to each column within each granularity.
+
+### File framing and encryption
 
 The plaintext layout is:
 
@@ -70,79 +86,11 @@ The root is a small directory, not another page stream. Its trailer offset locat
 
 The definition also supports plaintext/encrypted `FileInfo` alternatives, independently protected shared streams using the footer key, and separate column-key statistics modules. Protected modes retain `PAR3` and authenticate the visible directory. **The size and decoding comparisons use plaintext metadata.** Production encryption module-ID allocation and reader integration remain separate work; the protection contract is described in the Thrift definition.
 
-## 2. The four cumulative comparison levels
-
-Generate a separate complete artifact for each level and format. Do not measure a full artifact and merely skip requesting its statistics when reporting a core size.
-
-| Level | Script ID | Name | Contents | V2 additions |
-|---|---:|---|---|---|
-| 1 | 0 | **Core** | Schema, row/column counts, row-group/chunk descriptors and chunk placement. No statistics or page indexes. | `FileInfo`, chunk index, region map, row-group and chunk metadata. `page_index` absent. |
-| 2 | 1 | **Core + row-group stats** | Level 1 plus row-group min/max and supported pruning information. | Row-group-granularity range statistics. `page_index` still absent. |
-| 3 | 2 | **Core + stats + offset index** | Level 2 plus each data page's byte offset, length, and first-row index. | `page_index`, `relative_page_offsets`, and `PageMetadata`. Page length follows from boundaries. |
-| 4 | 3 | **Core + stats + offset index + page stats** | Level 3 plus available page-level min/max and pruning information. | A second statistics granularity, retaining the row-group ranges. |
-
-In standard Parquet, “page index” can mean both `OffsetIndex` and `ColumnIndex`. In our fourth level, “add page index” specifically means **add `ColumnIndex` / page statistics**, since `OffsetIndex` was added at level 3. `DataLayout.page_index` is a third, distinct term: it is V2's chunk-to-page array-position index.
-
-The supplementary **core + page offsets, without any statistics** comparison is size-only and is not one of these four cumulative levels.
-
-### What counts toward size
-
-Count the complete replacement metadata tail: source schema, structural indexes, root/directories, dictionaries, definition levels, every metadata page header and body, and the format's trailer. Include external current-format `OffsetIndex` and `ColumnIndex` bytes at the corresponding levels. Exclude source data-page bytes. Report exact bytes; KiB means 1,024 bytes.
-
-“Current core” removes optional statistics fields entirely; it does not leave empty statistics objects. All three formats start from the same fresh Java file, retain the same source schema, and preserve source bounds without additional truncation. Source-writer truncation, if any, is preserved. A column lacking page statistics must not acquire fabricated page bounds.
-
-| Format | Representation in the matched experiment |
-|---|---|
-| Current | Standard Compact-Thrift metadata, reserialized for each scope; required external page-index payloads included. |
-| Modular | Schema/placement/statistics/index modules, packed arrays and shared min/max prefixes, choosing the smaller valid dense-bitmap or sparse-present-index representation per array. |
-| Modular Footer V2 | Version-21 typed page streams, with encodings/page capacities selected by measured stored size. Report uncompressed and selective-Zstd variants separately. |
-
-Current/modular retain source column-order descriptors and exact null counts; V2 retains equivalent pruning flags. The comparison covers placement and pruning capability. Descriptive key/value metadata, `created_by`, histograms, and optional unencoded BYTE_ARRAY byte counts are excluded from the matched scopes. Record untouched Java footer totals separately. Exact aggregate-count capability is outside this comparison.
-
-## 3. Tested datasets
-
-### Wide schemas and multiple row groups
-
-These are complete Raincloud recipe outputs, with one fresh Java Parquet file per dataset. Counts below describe the generated files, not downloaded upstream Parquet files.
-
-| Raincloud slug | Rows | Physical columns | Row groups | Data pages | Java file bytes |
-|---|---:|---:|---:|---:|---:|
-| `kepler-labelled-time-series-data` | 5,087 | 3,198 | 1 | 3,198 | 74,087,086 |
-| `bi-wins` | 2,115,449 | 648 | 8 | 69,336 | 589,769,626 |
-| `bi-uscensus` | 9,398,385 | 519 | 23 | 244,968 | 2,354,846,136 |
-| `clickbench-hits` | 99,997,497 | 105 | 70 | 542,277 | 9,226,506,093 |
-
-Kepler Time Series deliberately consumes `exoTrain.csv`, as specified by its original Raincloud recipe. It is different from the 153-column Kepler dataset below. ClickBench's upstream is [hits.parquet](https://datasets.clickhouse.com/hits_compatible/hits.parquet); Raincloud reads it into canonical Arrow and rewrites it with Java before measurement.
-
-All four canonical-to-Java comparisons passed over every row and column. BI-Wins's Java self-check reported an unsupported seconds-versus-milliseconds time comparison; the independent streaming check passed with reversible logical-type normalization. The original self-check result remains in provenance.
-
-### Smaller and medium-width datasets
-
-| Raincloud slug | Rows | Physical columns | Row groups | Data pages | Java file bytes |
-|---|---:|---:|---:|---:|---:|
-| `uci-adult` | 48,842 | 15 | 1 | 45 | 373,085 |
-| `uci-individual-household-electric-power-consumption` | 2,075,259 | 9 | 1 | 936 | 9,443,498 |
-| `ampds-whe` | 1,051,200 | 12 | 1 | 636 | 17,467,853 |
-| `kepler-exoplanet-search-results` | 9,564 | 153 | 1 | 153 | 2,962,455 |
-
-These also use complete recipe outputs.
-
-### Pinned public shards
-
-These are all rows of **pinned input shards**, not the entire upstream US Accidents, FineWeb, or Hacker News collections. Each shard was freshly rewritten with Java using normal Raincloud row-group settings.
-
-| Benchmark input name | Raincloud recipe | Rows | Columns | Java row groups | Data pages |
-|---|---|---:|---:|---:|---:|
-| `us-accidents-00004-of-00007` | `us-accidents` | 1,104,056 | 46 | 1 | 2,620 |
-| `fineweb-10bt-000` | `fineweb-sample-10bt` | 1,048,581 | 9 | 11 | 3,513 |
-| `hacker-news-00000-of-00039` | `hacker-news` | 1,072,139 | 14 | 2 | 1,022 |
-| `yellow-tripdata-2025-01` | `yellow_tripdata_2025` | 3,475,226 | 20 | 1 | 3,480 |
-
-Source URLs and hashes are in [corpus.json](../real-footer-size/corpus.json). FineWeb's text column has no page statistics. Keep normal Raincloud row-group settings when reproducing this table.
-
-## 4. Fetch and write fresh data with Raincloud Java
+## 2. Run Raincloud with the Java writer
 
 Use Linux, Git, `uv`, Python 3.11 or newer, and JDK 17. Commands below use Bash and create sibling checkouts. Start in a new directory and a shell without inherited experimental `RAINCLOUD_*` settings. Keep raw downloads, canonical Arrow, scratch space, and Java outputs; storage needs exceed the final Parquet sizes. Start small before fetching ClickBench.
+
+### Install Raincloud and its Java writer
 
 ```bash
 set -euo pipefail
@@ -170,6 +118,8 @@ export FOOTER_PYTHON="$FOOTER_RAINCLOUD/.venv/bin/python"
 ```
 
 Use `--inexact` on later `uv sync` commands as well, so separately installed benchmark dependencies are retained. Source-specific extras, such as `--extra kaggle`, may be needed. The recorded Java writer is parquet-java **1.17.1**; its Arrow adapter submodule is pinned by Raincloud.
+
+### Select datasets and generate fresh Java files
 
 Create a new output directory and an isolated manifest. This copies the selected recipes and changes only the export writer, preserving transformations and row-group settings:
 
@@ -210,6 +160,8 @@ for slug in $FOOTER_DATASETS; do
 done
 ```
 
+### Output files and row-group settings
+
 `--format parquet@java` is essential: plain `parquet` can choose the default Python/PyArrow writer. An upstream Parquet download is an input, not the measured Java output. The resulting paths are:
 
 ```text
@@ -221,6 +173,8 @@ $RAINCLOUD_OUTPUTS/builds.json
 Raincloud writes **one file per dataset per format**. Row-group splitting happens inside that file; it does not create multiple files. Normal settings use a 128 MiB encoded-byte row-group target and the recipe's row limit, 10 million rows for these datasets. Java's byte accounting includes compressed closed pages and encoded open pages, so neither physical file size nor uncompressed bytes divided by 128 MiB predicts the exact row-group count. Keep those defaults for the matched campaign. If testing other settings, record a separate experiment.
 
 For parallel source fetching/conversion, give each worker its own manifest, output store, and scratch directory. A shared store has locking and may serialize work. Merge provenance afterward; do not mix timings with concurrent conversion jobs.
+
+### Dataset-specific fetching
 
 **Kepler Time Series:** the recipe uses Kaggle and selects only `exoTrain.csv`. Install its extra with `uv sync --extra build --extra kaggle --inexact` and configure Kaggle access. The measured run used the same public ZIP from `https://www.kaggle.com/api/v1/datasets/download/keplersmachines/kepler-labelled-time-series-data`, staged with Raincloud's `fetch_url` under a filename ending in `.zip`, then referenced by an isolated HTTP/file recipe. Preserve the original parsing, transformations, and fetch receipts if using this transport.
 
@@ -284,7 +238,119 @@ PY
 
 Keep the manifest, `builds.json`, source-provenance record, raw fetch receipts, and canonical files together. Page counts are obtained later by the metadata/page scan, not from file size.
 
-## 5. Build and run the benchmarks
+## 3. Datasets explored and their file information
+
+Start with **UCI Adult** to verify setup. Use **Kepler Time Series** for wide schemas, **BI-Wins/BI-USCensus** for wide schemas with multiple row groups, and **ClickBench** for many data pages.
+
+### Wide schemas and multiple row groups
+
+These are complete Raincloud recipe outputs, with one fresh Java Parquet file per dataset. Counts below describe the generated files, not downloaded upstream Parquet files.
+
+| Raincloud slug | Rows | Physical columns | Row groups | Data pages | Java file bytes |
+|---|---:|---:|---:|---:|---:|
+| `kepler-labelled-time-series-data` | 5,087 | 3,198 | 1 | 3,198 | 74,087,086 |
+| `bi-wins` | 2,115,449 | 648 | 8 | 69,336 | 589,769,626 |
+| `bi-uscensus` | 9,398,385 | 519 | 23 | 244,968 | 2,354,846,136 |
+| `clickbench-hits` | 99,997,497 | 105 | 70 | 542,277 | 9,226,506,093 |
+
+Kepler Time Series deliberately consumes `exoTrain.csv`, as specified by its original Raincloud recipe. It is different from the 153-column Kepler dataset below. ClickBench's upstream is [hits.parquet](https://datasets.clickhouse.com/hits_compatible/hits.parquet); Raincloud reads it into canonical Arrow and rewrites it with Java before measurement.
+
+All four canonical-to-Java comparisons passed over every row and column. BI-Wins's Java self-check reported an unsupported seconds-versus-milliseconds time comparison; the independent streaming check passed with reversible logical-type normalization. The original self-check result remains in provenance.
+
+### Smaller and medium-width datasets
+
+| Raincloud slug | Rows | Physical columns | Row groups | Data pages | Java file bytes |
+|---|---:|---:|---:|---:|---:|
+| `uci-adult` | 48,842 | 15 | 1 | 45 | 373,085 |
+| `uci-individual-household-electric-power-consumption` | 2,075,259 | 9 | 1 | 936 | 9,443,498 |
+| `ampds-whe` | 1,051,200 | 12 | 1 | 636 | 17,467,853 |
+| `kepler-exoplanet-search-results` | 9,564 | 153 | 1 | 153 | 2,962,455 |
+
+These also use complete recipe outputs.
+
+### Pinned public shards
+
+These are all rows of **pinned input shards**, not the entire upstream US Accidents, FineWeb, or Hacker News collections. Each shard was freshly rewritten with Java using normal Raincloud row-group settings.
+
+| Benchmark input name | Raincloud recipe | Rows | Columns | Java row groups | Data pages |
+|---|---|---:|---:|---:|---:|
+| `us-accidents-00004-of-00007` | `us-accidents` | 1,104,056 | 46 | 1 | 2,620 |
+| `fineweb-10bt-000` | `fineweb-sample-10bt` | 1,048,581 | 9 | 11 | 3,513 |
+| `hacker-news-00000-of-00039` | `hacker-news` | 1,072,139 | 14 | 2 | 1,022 |
+| `yellow-tripdata-2025-01` | `yellow_tripdata_2025` | 3,475,226 | 20 | 1 | 3,480 |
+
+Source URLs and hashes are in [corpus.json](../real-footer-size/corpus.json). FineWeb's text column has no page statistics. Keep normal Raincloud row-group settings when reproducing this table.
+
+## 4. Define the four size levels
+
+Generate a separate complete artifact for each level and format. Do not measure a full artifact and merely skip requesting its statistics when reporting a core size.
+
+| Level | Name | Contents | V2 additions |
+|---|---|---|---|
+| 1 | **Core** | Schema, row/column counts, row-group/chunk descriptors and chunk placement. No statistics or page indexes. | `FileInfo`, chunk index, region map, row-group and chunk metadata. `page_index` absent. |
+| 2 | **Core + row-group stats** | Level 1 plus row-group min/max and supported pruning information. | Row-group-granularity range statistics. `page_index` still absent. |
+| 3 | **Core + stats + offset index** | Level 2 plus each data page's byte offset, length, and first-row index. | `page_index`, `relative_page_offsets`, and `PageMetadata`. Page length follows from boundaries. |
+| 4 | **Core + stats + offset index + page stats** | Level 3 plus available page-level min/max and pruning information. | A second statistics granularity, retaining the row-group ranges. |
+
+In standard Parquet, “page index” can mean both `OffsetIndex` and `ColumnIndex`. In our fourth level, “add page index” specifically means **add `ColumnIndex` / page statistics**, since `OffsetIndex` was added at level 3. `DataLayout.page_index` is a third, distinct term: it is V2's chunk-to-page array-position index.
+
+The supplementary **core + page offsets, without any statistics** comparison is size-only and is not one of these four cumulative levels.
+
+### What counts toward size
+
+Count the complete replacement metadata tail: source schema, structural indexes, root/directories, dictionaries, definition levels, every metadata page header and body, and the format's trailer. Include external current-format `OffsetIndex` and `ColumnIndex` bytes at the corresponding levels. Exclude source data-page bytes. Report exact bytes; KiB means 1,024 bytes.
+
+“Current core” removes optional statistics fields entirely; it does not leave empty statistics objects. All three formats start from the same fresh Java file, retain the same source schema, and preserve source bounds without additional truncation. Source-writer truncation, if any, is preserved. A column lacking page statistics must not acquire fabricated page bounds.
+
+Current/modular retain source column-order descriptors and exact null counts; V2 retains equivalent pruning flags. The comparison covers placement and pruning capability. Descriptive key/value metadata, `created_by`, histograms, and optional unencoded BYTE_ARRAY byte counts are excluded from the matched scopes. Record untouched Java footer totals separately. Exact aggregate-count capability is outside this comparison.
+
+Report four size columns for each level: **current**, **modular**, **V2 uncompressed**, and **V2 with selective Zstd**. Encoding and compression selection are described in section 5. All decoding comparisons use the uncompressed artifacts.
+
+## 5. Encoding and decoding implementations
+
+### Implementations to use
+
+Source-data generation and metadata encoding are separate steps: Raincloud's Java writer produces the source Parquet file; the native benchmark encodes and decodes the proposed metadata streams.
+
+| Component | Code to use | Role |
+|---|---|---|
+| Current footer reader | Apache Arrow C++ Parquet `FileMetaData` and page-index readers. | Decode the current-format baseline from the same Java-written input. |
+| Modular footer reader | Native Compact-Thrift and packed-array reader for [ModularFooter.thrift](../modular-footer/ModularFooter.thrift). | Decode the modular baseline, including its dense/sparse arrays and module directories. |
+| Integer delta encoding | Runtime [dbl/parquet/dbp.h](https://github.com/databricks-eng/runtime/blob/ce6aeb66fdfb1362888367c2535bc85ef7c7b7ae/dbl/parquet/dbp.h) and `dbp.cc`. | Optimized DELTA_BINARY_PACKED encoding and block decoding for integer metadata. |
+| PFOR | Runtime [PR #267100](https://github.com/databricks-eng/runtime/pull/267100), including the updated [dbl/pfor.h](https://github.com/databricks-eng/runtime/blob/f9219aef669a0b71dae56678e3e410f792c858e7/dbl/pfor.h) and `pfor.cc`. | Use upstream `BlockDecoder` selective access and bulk decoding; select the path according to the requested coverage. |
+| Floating-point bounds | Runtime [dbl/alp.h](https://github.com/databricks-eng/runtime/blob/e8481f067b42f97e6e978c4435642daa0f742811/dbl/alp.h) / `alp.cc` and [dbl/parquet/bss.h](https://github.com/databricks-eng/runtime/blob/e8481f067b42f97e6e978c4435642daa0f742811/dbl/parquet/bss.h) / `src/bss.rs`. | Test ALP and BYTE_STREAM_SPLIT alongside PLAIN and dictionary candidates. |
+| Standard Parquet candidates | Apache Arrow C++ Parquet native encoders/decoders (`MakeTypedEncoder`, `MakeTypedDecoder`, dictionary APIs). | PLAIN, dictionary, byte-array delta encodings, and reference decoding where used by the adapters. |
+| Metadata framing and nullability | Ordinary [Parquet PageHeader / DataPageHeaderV2](../modular-footer/parquet.thrift), with RLE/bit-packed definition levels. | Charge real headers, dictionaries, levels, and bodies to the measured size. |
+
+Use the optimized codec implementations through native adapters. Record any fallback implementation in the result so a codec change is visible. The Runtime links require repository access.
+
+### Build dependencies and pinned revisions
+
+Reproducing the optimized V2 measurements requires the separate experiment harness and Runtime codec sources. That harness uses C++20 release readers, Arrow/Parquet libraries from PyArrow, optimized Runtime `dbl/parquet` encodings, Runtime PFOR, and DBL floating-point codecs. Rust is used for the BSS adapter. Python also needs `zstandard` and `thriftpy2`. Building the repository's CMake targets does not build this harness.
+
+The recorded codec sources are pinned independently:
+
+| Component | Recorded revision |
+|---|---|
+| Raincloud | `73575174111e3f173b492681d7decb12ae3c4e8c` |
+| parquet-arrow-java adapter | `9f98247cf2129dcd71e8e755c04b330cf7ed62d7` |
+| DBL integer encoding sweep, including PFOR encoder | `ce6aeb66fdfb1362888367c2535bc85ef7c7b7ae` |
+| Updated PFOR decoder, [PR #267100](https://github.com/databricks-eng/runtime/pull/267100) | `f9219aef669a0b71dae56678e3e410f792c858e7` |
+| DBL floating-point codecs | `e8481f067b42f97e6e978c4435642daa0f742811` |
+
+The recorded native linkage uses PyArrow 26.0.0 (`libarrow.so.2600` / `libparquet.so.2600`). If changing versions or machines, regenerate compiler/link paths and record the new build rather than reusing a binary compiled with `-march=native` elsewhere.
+
+An equivalent harness needs a source-page scanner and logical metadata oracle, serializers for all three formats and four scopes, encoding adapters, and native readers that produce the same selected-column output. Validate page locations and statistics against the Java source before timing. Build and validate first; run timings without competing conversion or compilation jobs. Record the exact codec source hashes and compiler arguments alongside the results.
+
+### Encoding selection and compression
+
+Encoding selection searches actual serialized sizes across metadata-page capacities of **1,024, 4,096, 16,384, and 65,536 scalars**. Candidates include PLAIN, dictionary, DBL DELTA_BINARY_PACKED geometries, PFOR auto/frame, BYTE_STREAM_SPLIT, ALP for floating-point bounds, and byte-array delta encodings where applicable. BOOLEAN PLAIN is already bit-packed. Nullable levels use RLE/bit-packing.
+
+“Best encoding” here means **smallest among the tested candidates**, not a proof of optimal size or fastest decoding. Uncompressed and compressed variants choose independently. Zstd is retained only when it saves **at least 256 bytes and at least 10%** of the encoded payload. PFOR and ALP use experimental encoding contracts/IDs; ordinary page framing alone does not make them readable by an unmodified Parquet implementation.
+
+Forced-PFOR controls change only `column_chunk_index` and `region_offsets`, preserving other streams. The updated PFOR decoder supports selective access; the planned reader uses selective access for partial projection and bulk-decodes each needed stream once for full projection. Bulk results are reused only within that operation.
+
+## 6. Run decoding tests
 
 ### Public baseline tools
 
@@ -303,33 +369,9 @@ export FOOTER_INPUT="$RAINCLOUD_OUTPUTS/v2/uci-adult/parquet/uci-adult.parquet"
 ./build/footer_decode_bench "$FOOTER_RUN_DIR/adult.jt.parquet" --sweep "$FOOTER_RUN_DIR/adult.modular" > "$FOOTER_RUN_DIR/baseline-sweep.csv"
 ```
 
-These commands provide a current/jump-table/modular playground. The converter includes row-group statistics by default. Its `--page-index` option adds both OffsetIndex and ColumnIndex; it does not produce all four matched scopes individually. `footer_decode_bench` has its own reader/workload, described in [its README](../footer-decode-bench/README.md). Label its output separately from the V2 protocol below. The matched modular baseline additionally chooses the smaller dense/sparse representation per array.
+These commands provide a current/jump-table/modular playground. The converter includes row-group statistics by default. Its `--page-index` option adds both OffsetIndex and ColumnIndex; it does not produce all four matched scopes individually. `footer_decode_bench` has its own reader/workload, described in [its README](../footer-decode-bench/README.md). Its built-in `--sweep` does not implement the full position-test matrix below. Label its output separately from the matched V2 protocol. The matched modular baseline additionally chooses the smaller dense/sparse representation per array.
 
-### Optimized V2 benchmark requirements
-
-Reproducing the optimized V2 measurements requires the separate experiment harness and Runtime codec sources. That harness uses C++20 release readers, Arrow/Parquet libraries from PyArrow, optimized Runtime `dbl/parquet` encodings, Runtime PFOR, and DBL floating-point codecs. Rust is used for the BSS adapter. Python also needs `zstandard` and `thriftpy2`. Building the repository's CMake targets does not build this harness.
-
-The recorded codec sources are pinned independently:
-
-| Component | Recorded revision |
-|---|---|
-| Raincloud | `73575174111e3f173b492681d7decb12ae3c4e8c` |
-| parquet-arrow-java adapter | `9f98247cf2129dcd71e8e755c04b330cf7ed62d7` |
-| DBL integer encoding sweep, including PFOR encoder | `ce6aeb66fdfb1362888367c2535bc85ef7c7b7ae` |
-| Updated PFOR decoder, [PR #267100](https://github.com/databricks-eng/runtime/pull/267100) | `f9219aef669a0b71dae56678e3e410f792c858e7` |
-| DBL floating-point codecs | `e8481f067b42f97e6e978c4435642daa0f742811` |
-
-The recorded native linkage uses PyArrow 26.0.0 (`libarrow.so.2600` / `libparquet.so.2600`). If changing versions or machines, regenerate compiler/link paths and record the new build rather than reusing a binary compiled with `-march=native` elsewhere.
-
-An equivalent harness needs a source-page scanner and logical metadata oracle, serializers for all three formats and four scopes, encoding adapters, and native readers that produce the same selected-column output. Validate page locations and statistics against the Java source before timing. Build and validate first; run timings without competing conversion or compilation jobs. Record the exact codec source hashes and compiler arguments alongside the results.
-
-## 6. Encodings and decoding protocol
-
-Encoding selection searches actual serialized sizes across metadata-page capacities of **1,024, 4,096, 16,384, and 65,536 scalars**. Candidates include PLAIN, dictionary, DBL DELTA_BINARY_PACKED geometries, PFOR auto/frame, BYTE_STREAM_SPLIT, ALP for floating-point bounds, and byte-array delta encodings where applicable. BOOLEAN PLAIN is already bit-packed. Nullable levels use RLE/bit-packing.
-
-“Best encoding” here means **smallest among the tested candidates**, not a proof of optimal size or fastest decoding. Uncompressed and compressed variants choose independently. Zstd is retained only when it saves **at least 256 bytes and at least 10%** of the encoded payload. PFOR and ALP use experimental encoding contracts/IDs; ordinary page framing alone does not make them readable by an unmodified Parquet implementation.
-
-Forced-PFOR controls change only `column_chunk_index` and `region_offsets`, preserving other streams. The updated PFOR decoder supports selective access; the planned reader uses selective access for partial projection and bulk-decodes each needed stream once for full projection. Bulk results are reused only within that operation.
+### Matched decoding protocol
 
 For the main matched timing workload:
 
@@ -360,7 +402,7 @@ Plot one-column latency against physical column ordinal, alongside the separate 
 
 Useful additional workloads are placement-only access while statistics remain in the artifact; locating a known row's page in every output column; a synthetic 2,000-column × 10-row-group metadata fixture; and dependent-fetch replay with 4 KiB, 64 KiB, and 512 KiB initial reads. Label them separately. Known-row lookup excludes finding the match. Fetch replay measures bytes, requests, and dependent rounds; it does not measure cloud latency or end-to-end query execution.
 
-## 7. Record and extend an experiment
+## 7. Save and compare results
 
 For a new experiment, start from one verified Java source and keep the four scopes fixed. Change one variable: dataset, metadata encoding candidates, page capacity, compression policy, or selective/bulk access policy. Save a new run directory instead of replacing the reference artifacts. If changing information coverage, label the new scope explicitly.
 
