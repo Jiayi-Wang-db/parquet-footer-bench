@@ -335,11 +335,28 @@ For the main matched timing workload:
 
 1. Use resident, **uncompressed** serialized metadata for all layouts, including dictionary bodies. Verify page flags/codecs and runtime zero-decompression counters. Source data files may still use Zstd.
 2. Start each operation with a fresh root/schema reader. Include structural-index access, selected metadata decoding, consumer checksumming, and reader destruction. No parsed/decoded cache survives an operation.
-3. Select one physical column, then 10%, 20%, …, 100%, rounding up to whole columns. Record both requested percentage and actual column count. Use a fixed shuffled order and rotating windows; the wide campaign caps this at 32 windows per projection.
+3. Always include explicit **one-column** and **all-column** cases for every dataset, scope, and format. Sweep one-column reads across every physical leaf-column ordinal and retain a separate timing for each position. Also test 10%, 20%, …, 90%, rounding up to whole columns. Record actual column counts and selected ordinals; a percentage that rounds up to all columns does not replace the explicitly labeled all-column case.
 4. Consume the same placement/statistics/page information for each projected column in the selected scope. Validate all readers against the Java-source oracle before timing.
 5. Use three separate CPU-pinned processes per suite, 20 ms calibration per configuration, and nine randomized interleaved trials targeting 5 ms each. Report the median of the three process medians and retain every trial. A single operation/window can exceed the target duration on large inputs.
 
 These are **metadata access timings**, not isolated deserialization timings or end-to-end SQL query times. Selected-column extraction can make current Thrift's line slope even though it parses the whole footer. Column names have already been resolved to physical ordinals. Storage I/O, source data-page decoding, predicate evaluation, and query execution are excluded. Smaller bytes do not imply lower decoding CPU time.
+
+### Required column-position tests
+
+The selected columns' physical positions can affect schema traversal, shared-index decoding, and how many encoded blocks or metadata pages a reader visits. A rotating-position average alone cannot show this effect. Apply the following matrix to all four metadata scopes and all three footer formats, using the same selected ordinals for each format:
+
+| Case | Selected columns | Report |
+|---|---|---|
+| One column, position sweep | `{c}` for every ordinal `c` from 0 to C−1. Each position is a separate timing configuration. | Latency by ordinal, with first (`0`), middle (`floor(C/2)`), and last (`C−1`) highlighted. Retain every position's raw trials. |
+| All columns | Every ordinal from 0 to C−1 in one operation. | An explicit all-column result; V2 uses bulk decoding for each needed stream. |
+| Partial, contiguous | For each 10%–90% projection, take k adjacent columns starting at `0`, `floor((C−k)/2)`, and `C−k`. | Separate first, middle, and last window timings at the same selected-column count. |
+| Partial, scattered | For each 10%–90% projection, use a fixed seeded shuffle and rotating windows, with up to 32 distinct sets. | Per-set timings and an aggregate distribution, retaining the seed and exact ordinals. |
+
+Deduplicate identical sets when rounding or a narrow schema makes cases coincide, but retain their labels. For C=1, the one-column and all-column labels refer to the same measured selection. Randomize/interleave position cases during timing so ordinal does not track benchmark execution order. Use a fresh reader for every operation, as in the main protocol.
+
+Real columns differ in type, chunk/page count, statistics availability, and encoded size. Save those properties with each position's timing, together with decoded-value/block/page and byte counters where available. Also run a uniform synthetic metadata control with the same type and chunk/page/statistics counts per column; use it to separate position effects from differences in the amount of metadata requested. Include positions on both sides of encoded-block and metadata-page boundaries in the analysis.
+
+Plot one-column latency against physical column ordinal, alongside the separate all-column result. Summaries may report median and worst-position latency, but must not replace the per-position measurements. Position-specific correctness checks alone do not count as position-specific speed measurements.
 
 Useful additional workloads are placement-only access while statistics remain in the artifact; locating a known row's page in every output column; a synthetic 2,000-column × 10-row-group metadata fixture; and dependent-fetch replay with 4 KiB, 64 KiB, and 512 KiB initial reads. Label them separately. Known-row lookup excludes finding the match. Fetch replay measures bytes, requests, and dependent rounds; it does not measure cloud latency or end-to-end query execution.
 
@@ -349,4 +366,4 @@ For a new experiment, start from one verified Java source and keep the four scop
 
 Each run should retain source/manifest hashes and writer records; the Thrift-definition hash; compiler/codec revisions; complete artifact bytes and hashes; per-stream/page encoding choices; source and artifact audits; CPU/environment details; raw trials; and size/decoding CSVs. Preserve an untouched source-footer size reference beside the normalized comparisons. Record correctness validation, sanitizer status, size completion, and timing completion separately.
 
-A useful result table has `dataset`, `scope`, `current bytes`, `modular bytes`, `V2 raw bytes`, and `V2 cutoff-Zstd bytes`. A separate timing table has `dataset`, `scope`, `selected columns`, and uncompressed microseconds for each layout. Keep single-process results explicitly labeled until the complete timing protocol finishes.
+A useful result table has `dataset`, `scope`, `current bytes`, `modular bytes`, `V2 raw bytes`, and `V2 cutoff-Zstd bytes`. A separate timing table has `dataset`, `scope`, `case`, `selected column count`, `selected ordinals`, `position/window`, and uncompressed microseconds for each layout. Include explicit one-column and all-column results, plus the per-position sweep. Keep single-process results explicitly labeled until the complete timing protocol finishes.
