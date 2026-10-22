@@ -55,8 +55,10 @@ struct DataLayout {
   /** INT32, required, K+1 entries, starting at 0 and ending at P.
     * Data-page metadata is flattened in column-chunk order, then logical page order within each chunk.
     * Column chunk cc's metadata occupies: [page_index[cc], page_index[cc+1]).
+    * Required when DataLocation.relative_page_offsets or FileMetaData.page_metadata is present.
+    * If absent, determining each chunk's page count requires scanning its page headers.
     */
-  2: required StreamLocation page_index;
+  2: optional StreamLocation page_index;
 }
 
 struct DataLocation {
@@ -78,6 +80,7 @@ struct DataLocation {
     * Data-page metadata is flattened in column-chunk order, then logical page order within each chunk.
     * Column chunk cc's page offsets occupy: [page_index[cc], page_index[cc+1]).
     * Offsets start at 0 and strictly increase within each chunk; the last page ends at the region end.
+    * Requires DataLayout.page_index.
     * If the stream is absent, locating interior pages requires scanning page headers.
     */
   3: optional StreamLocation relative_page_offsets;
@@ -128,6 +131,7 @@ struct ColumnChunkMetadata {
   5: required StreamLocation num_values;
 }
 
+/** Requires DataLayout.page_index. */
 struct PageMetadata {
   /** INT64, required, P entries, storing absolute first-row indexes.
     * Data-page metadata is flattened in column-chunk order, then logical page order within each chunk.
