@@ -2,6 +2,8 @@
 
 Use this guide to generate fresh Java-written Parquet inputs, understand the footer layouts, and compare metadata size and decoding cost. Every comparison starts from the same source file. Decoding timings use **uncompressed metadata**; compressed sizes are reported separately.
 
+The [experiment results reference](EXPERIMENT-RESULTS.md) collects the measured sizes, decoding times, layout/encoding experiments, and source records in one file. It marks preliminary timings and unmeasured cases explicitly.
+
 1. [What Modular Footer V2 is](#1-what-modular-footer-v2-is)
 2. [Run Raincloud with the Java writer](#2-run-raincloud-with-the-java-writer)
 3. [Datasets explored and their file information](#3-datasets-explored-and-their-file-information)

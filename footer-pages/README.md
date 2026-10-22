@@ -5,6 +5,7 @@ Modular Footer V2 stores metadata arrays as typed Parquet page streams, with a s
 | Start here | Contents |
 |---|---|
 | [Playground guide](PLAYGROUND.md) | V2 design → Raincloud setup → tested datasets → four size levels → codec implementations → decoding tests → layout/encoding experiments → result recording. |
+| [Experiment results](EXPERIMENT-RESULTS.md) | Consolidated size/decoding results, design experiments, source-record lookup, and pending measurements. |
 | [Thrift definition](ModularFooterV2.thrift) | Version-21 layout, page streams, statistics, and encryption contract. |
 | [Layout visualization](data-location-visualization.html) | Interactive HTML; download and open in a browser. |
 
