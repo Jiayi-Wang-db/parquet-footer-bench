@@ -22,12 +22,12 @@ under the License.
 A layout is one entry in the registry: a name plus two functions. Everything
 else -- the benchmark, the fidelity test, the CSV output -- picks it up
 automatically. There are no base classes to implement and no files to register;
-you edit one file, `src/layouts.cc`.
+you edit one file, `pfb-harness/layouts.cc`.
 
 ## The contract
 
 A layout implements two halves with these exact signatures (see
-`include/pfb/harness.h`):
+`pfb-harness/harness.h`):
 
 ```cpp
 // Serialize the placement information in your encoding. The Model is the ground
@@ -79,11 +79,11 @@ timing.
 
 This is a real layout added to the repo. It stores placement array-of-structs --
 one interleaved `[off, size, off, size, ...]` list -- instead of `soa_flat`'s two
-parallel lists. Three steps, all in `src/layouts.cc`.
+parallel lists. Three steps, all in `pfb-harness/layouts.cc`.
 
 ### Step 1 -- write `Build` (Model -> bytes)
 
-Use the vendored `Writer` (`include/pfb/thrift_compact.h`). It writes valid
+Use the vendored `Writer` (`pfb-harness/thrift_compact.h`). It writes valid
 Thrift Compact: field headers, list headers, and `i8/i32/i64`.
 
 ```cpp
@@ -125,7 +125,7 @@ Resolved ResolveAos(const std::string& blob, const Model& m, Query q) {
 
 ### Step 3 -- register it
 
-Add one line to `Layouts()` at the bottom of `src/layouts.cc`:
+Add one line to `Layouts()` at the bottom of `pfb-harness/layouts.cc`:
 
 ```cpp
 const std::vector<Layout>& Layouts() {
@@ -165,11 +165,11 @@ fidelity test tells you which shape and query broke before any number is reporte
 ## Tuning the workload
 
 A layout is only as meaningful as the shapes it runs on. Edit `kBuiltinShapes`
-in `src/main.cc`, or run a one-off:
+in `pfb-harness/main.cc`, or run a one-off:
 
 ```sh
 ./build/pfb_bench --columns 1000 --row-groups 4 --pages 128 --projected 32 --rows 2000000
 ```
 
 To change page/chunk size distributions (and thus how big offsets and varints
-get), edit `BuildModel` in `src/layouts.cc`.
+get), edit `BuildModel` in `pfb-harness/layouts.cc`.

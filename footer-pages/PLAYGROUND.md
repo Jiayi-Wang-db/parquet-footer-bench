@@ -8,9 +8,18 @@ Use this guide to generate fresh Java-written Parquet inputs, understand the foo
 4. [Define the four size levels](#4-define-the-four-size-levels)
 5. [Encoding and decoding implementations](#5-encoding-and-decoding-implementations)
 6. [Run decoding tests](#6-run-decoding-tests)
-7. [Save and compare results](#7-save-and-compare-results)
+7. [Experiment with layouts and encodings](#7-experiment-with-layouts-and-encodings)
+8. [Save and compare results](#8-save-and-compare-results)
 
 This repository includes the [V2 definition](ModularFooterV2.thrift), a [layout visualization](data-location-visualization.html), and baseline benchmark tools. The Raincloud and baseline commands below are runnable from those sources. The optimized V2 harness is a separate dependency; section 5 identifies the implementations it needs.
+
+| What someone can do from this checkout | Availability |
+|---|---|
+| Generate fresh Java Parquet inputs | Runnable with the Raincloud setup below. |
+| Add and compare synthetic placement layouts | Runnable with `pfb_bench`; section 7 gives the extension points. |
+| Convert real files to the existing modular/jump-table layouts | Runnable with the baseline CMake tools. |
+| Change V2 layout or encoding and regenerate all four scopes | Requires the separate V2 artifact generator, codec adapters, and native readers. These are not included in this checkout. |
+| Run the full V2 projection and per-column-position matrix | The required protocol is documented; its complete runner is not included in this checkout. |
 
 ## 1. What Modular Footer V2 is
 
@@ -402,7 +411,49 @@ Plot one-column latency against physical column ordinal, alongside the separate 
 
 Useful additional workloads are placement-only access while statistics remain in the artifact; locating a known row's page in every output column; a synthetic 2,000-column × 10-row-group metadata fixture; and dependent-fetch replay with 4 KiB, 64 KiB, and 512 KiB initial reads. Label them separately. Known-row lookup excludes finding the match. Fetch replay measures bytes, requests, and dependent rounds; it does not measure cloud latency or end-to-end query execution.
 
-## 7. Save and compare results
+## 7. Experiment with layouts and encodings
+
+### Try a layout with the included synthetic harness
+
+The [placement harness](../pfb-harness/README.md) compares actual serialized bytes and resolves them back to chunk/page locations. It includes flat arrays, bit-packed arrays, delta/bit-packed arrays, indexed structs, and placement plus optional page-index layouts. It uses synthetic metadata and does not implement the complete V2 footer.
+
+After the CMake build in section 6:
+
+```bash
+cd "$FOOTER_BENCH"
+./build/pfb_bench --list
+./build/pfb_bench --columns 256 --row-groups 8 --pages 16 --projected 1 > "$FOOTER_RUN_DIR/layouts-one.csv"
+./build/pfb_bench --columns 256 --row-groups 8 --pages 16 --projected 256 > "$FOOTER_RUN_DIR/layouts-all.csv"
+```
+
+To add a candidate, implement `Build` and `Resolve` in [pfb-harness/layouts.cc](../pfb-harness/layouts.cc), then register them in `Layouts()`. `Build` serializes the metadata; `Resolve` must return the same requested locations as the model. See the [worked example](../pfb-harness/ADDING_A_LAYOUT.md). Change one representation at a time, such as array-of-structs versus separate arrays, absolute versus delta offsets, or the placement of a lookup directory.
+
+```bash
+cmake --build build -j2 --target pfb_bench pfb_fidelity_test
+ctest --test-dir build -R '^fidelity$' --output-on-failure
+```
+
+The benchmark and fidelity test discover the new registry entry automatically. The commands above exercise explicit one-column and all-column cases. This harness's built-in selection does not replace the separately timed position sweep required in section 6.
+
+### Compare V2 layout and encoding choices
+
+For the V2 harness, keep the Java input, logical metadata, and scope fixed while changing a representation. The following are experiment controls to expose in that harness, not CLI flags implemented by the public tools:
+
+| Experiment | Change | Hold fixed |
+|---|---|---|
+| Region layout | One region per chunk versus one per page; corresponding region IDs and relative offsets. | Same source page byte ranges and statistics coverage. Count every added/removed index. |
+| Array organization | Flat scalar streams, grouped streams, index representation, or physical stream order. | Same logical values, null positions, schema, and requested output. |
+| Integer encoding | Force PLAIN, DBP, PFOR frame, or PFOR auto on named streams, then compare with automatic selection. | Stream values, page capacity, compression disabled, and all unrelated streams. |
+| Floating-point/string encoding | PLAIN, dictionary, ALP/BYTE_STREAM_SPLIT for floats, or byte-array delta candidates for strings. | Exact source bounds and null positions; no extra truncation. |
+| Metadata page capacity | 1,024 / 4,096 / 16,384 / 65,536 scalar entries. | Encoding policy, scope, and compression policy. Count changed headers and dictionaries. |
+| Compression | Uncompressed versus selective Zstd. | The same encoded payloads when isolating compression's effect. Independently optimized choices are a separate comparison. |
+| Reader access strategy | Selective versus bulk decoding, including PFOR random access. | Byte-identical artifacts and selected-column sets. |
+
+For each candidate, serialize a complete artifact, decode it back to the common source oracle, and save its field/page encoding choices. Then run all four scopes and the required projection/position cases. Changing a Thrift declaration alone does not implement a layout: the serializer, reader, and validation must change together. Give incompatible wire experiments distinct version/variant identities.
+
+To make this a complete reusable V2 playground, the repository still needs the V2 artifact generator, native codec build/adapters, matching C++ readers, projection/position runner, and result exporter packaged with configurable paths. The codec links in section 5 identify dependencies; they do not supply that integration.
+
+## 8. Save and compare results
 
 For a new experiment, start from one verified Java source and keep the four scopes fixed. Change one variable: dataset, metadata encoding candidates, page capacity, compression policy, or selective/bulk access policy. Save a new run directory instead of replacing the reference artifacts. If changing information coverage, label the new scope explicitly.
 
