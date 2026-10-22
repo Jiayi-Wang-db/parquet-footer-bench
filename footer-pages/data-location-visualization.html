@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modular Footer V2: Data layout, statistics, and encryption</title>
+<style>
+  :root { color-scheme: light; font-family: system-ui, sans-serif; color: #172b44; background: #eef2f6; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 40px 24px; }
+  main { max-width: 1240px; margin: auto; }
+  .eyebrow { color: #53657b; font-size: 12px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+  h1 { font-size: clamp(28px, 4vw, 42px); letter-spacing: -.04em; margin: 10px 0; }
+  .intro { max-width: 850px; line-height: 1.6; color: #52637a; margin: 0 0 24px; }
+  .toolbar { display: flex; gap: 20px; align-items: end; flex-wrap: wrap; background: white; border: 1px solid #d8e0e8; border-radius: 12px; padding: 18px 22px; margin: 20px 0 16px; }
+  label { display: flex; gap: 6px; flex-direction: column; color: #52637a; font-size: 12px; font-weight: 650; }
+  select, button { font: inherit; color: #172b44; background: white; border: 1px solid #b5c3d3; border-radius: 6px; padding: 9px 12px; }
+  select { min-width: 140px; font-size: 14px; }
+  button { cursor: pointer; }
+  button:hover { background: #f0f5ff; }
+  :focus-visible { outline: 3px solid #2463eb; outline-offset: 3px; }
+  .toggle { flex-direction: row; align-items: center; align-self: center; gap: 8px; font-size: 13px; }
+  input { accent-color: #2463eb; width: 17px; height: 17px; }
+  .export { margin-left: auto; font-size: 13px; }
+  .diagram { background: white; border: 1px solid #d8e0e8; border-radius: 12px; overflow-x: auto; }
+  svg { width: 100%; min-width: 920px; display: block; }
+  #dictionary-diagram { margin-top: 18px; }
+  .section-label { width: 100%; font-size: 17px; font-weight: 700; }
+  code { font-family: ui-monospace, monospace; font-size: .94em; }
+  footer { font-size: 12px; color: #52637a; margin-top: 18px; line-height: 1.7; }
+  a { color: #1c5ec7; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  @media (max-width: 700px) { body { padding: 24px 12px; } .export { margin-left: 0; } }
+  @media print { body { padding: 0; background: white; } .toolbar { display: none; } svg { min-width: 0; } .diagram { border: 0; } footer { break-inside: avoid; } }
+</style>
+<main>
+  <div class="eyebrow">Parquet · Modular Footer V2</div>
+  <h1>Modular Footer V2: Data layout, statistics, and encryption</h1>
+  <p><a href="https://github.com/Jiayi-Wang-db/parquet-footer-bench/blob/main/footer-pages/ModularFooterV2.thrift">View the Thrift definition: ModularFooterV2.thrift</a></p>
+  <p class="intro">First, see how regions describe byte ranges in the file. Then select a column’s chunk and a page inside it. C0 has three chunks; C1 and C2 each have two. C0’s third chunk fits between C1’s and C2’s second chunks, preserving each column’s chunk order.</p>
+  <div class="diagram" id="region-diagram"></div>
+  <div class="toolbar" aria-label="Choose a page to trace">
+    <label for="column">Column<select id="column"></select></label>
+    <label for="chunk">Chunk within column<select id="chunk"></select></label>
+    <label for="page">Page within chunk<select id="page"></select></label>
+    <label class="toggle"><input type="checkbox" id="offsets" checked>Include relative_page_offsets</label>
+    <button type="button" class="export" id="export">Download this view as SVG ↓</button>
+  </div>
+  <div class="diagram" id="diagram"></div>
+  <p id="summary" class="sr-only" aria-live="polite"></p>
+  <div class="diagram" id="dictionary-diagram"></div>
+  <div class="toolbar" aria-label="Explore row-range statistics">
+    <div class="section-label">Explore row-range statistics</div>
+    <label for="stats-granularity">List entry / granularity<select id="stats-granularity"></select></label>
+    <label for="stats-column">Highlight column<select id="stats-column"></select></label>
+    <label for="stats-range">Row interval<select id="stats-range"></select></label>
+  </div>
+  <div class="diagram" id="stats-diagram"></div>
+  <div class="toolbar" aria-label="Explore metadata protection">
+    <div class="section-label">Explore encryption in the current V2 design</div>
+    <label for="protection-mode">Encryption case<select id="protection-mode"></select></label>
+    <label class="toggle"><input type="checkbox" id="pme-key" checked><span id="pme-key-label">Footer key available</span></label>
+  </div>
+  <div class="diagram" id="pme-diagram"></div>
+  <footer>
+    All ordinals are zero-based; all intervals are half-open. Values are illustrative. The file strip shows only bytes [100, 4000).<br>
+    Chunks stay in logical order within each column; different columns can have different chunk counts and interleave in the file. Local chunk numbers restart at 0; global cc indexes the column-major metadata.<br>
+    The arrays shown are the <em>decoded contents</em> of streams located by <code>StreamLocation</code>; each descriptor’s own offset/length locates metadata bytes.<br>
+    These five fields locate each chunk’s <em>data pages</em>. Metadata and any required dictionary are separate reads; dictionary associations come from <code>ColumnChunkMetadata.dictionary_regions</code>.<br>
+    <a href="https://github.com/Jiayi-Wang-db/parquet-footer-bench/blob/main/footer-pages/ModularFooterV2.thrift">Source: ModularFooterV2.thrift</a> · <a href="https://github.com/apache/parquet-format/blob/master/Encryption.md">PME specification</a> · No external libraries or network requests are needed to use this visualization.
+  </footer>
+</main>
+<script>
+  const data = {
+    column_chunk_index: [0, 3, 5, 7],
+    page_index: [0, 2, 4, 6, 8, 10, 12, 14],
+    region_ordinals: [1, 5, 7, 3, 6, 4, 8],
+    region_offsets: [100, 200, 800, 900, 1300, 1800, 2300, 2900, 3300, 3800, 4000],
+    relative_page_offsets: [0, 250, 0, 200, 0, 180, 0, 160, 0, 250, 0, 240, 0, 200],
+    dictionary_regions: [0, null, 0, null, null, null, null],
+    page_first_rows: [0, 3, 6, 8, 10, 11, 0, 3, 6, 9, 0, 3, 6, 9]
+  };
+  // Flat, nullable INT32 columns: these source values make the illustrated bounds auditable.
+  const sourceColumns = [
+    [2, 5, null, 7, 9, 4, 12, 16, 14, null, 20, 22],
+    [30, 32, 31, 34, 38, 35, 41, null, 43, 47, 45, 49],
+    [null, null, null, 4, 6, 5, 8, 10, 9, 12, 11, 14]
+  ];
+  const numRows = 12;
+  const granularityStarts = [
+    [[0, 6], [0, 4, 8], [0, 3]],
+    [data.page_first_rows.slice(0, 6), [], []],
+    [[0, 4, 9], [0, 2, 5, 9], []]
+  ];
+  const rowRangeStatistics = granularityStarts.map((startsByColumn, g) => {
+    const columns = sourceColumns.map((values, c) => {
+      const starts = startsByColumn[c];
+      return starts.map((start, i) => {
+        const end = starts[i + 1] ?? numRows, rows = values.slice(start, end), nonNull = rows.filter(v => v !== null);
+        return { start, end, min: nonNull.length ? Math.min(...nonNull) : null, max: nonNull.length ? Math.max(...nonNull) : null,
+          nullCount: rows.length - nonNull.length, distinctCount: new Set(nonNull).size, exact: nonNull.length ? true : null };
+      });
+    });
+    const ranges = columns.flat(), column_range_starts = [0];
+    columns.forEach(ranges => column_range_starts.push(column_range_starts.at(-1) + ranges.length));
+    return { label: `Granularity ${g}`, columns, column_range_starts,
+      statistics: {
+        range_start_rows: ranges.map(r => r.start),
+        min_max_int32: ranges.flatMap(r => [r.min, r.max]),
+        min_max_is_exact: ranges.flatMap(r => [r.exact, r.exact]),
+        contains_null: ranges.map(r => r.nullCount > 0),
+        is_all_null: ranges.map(r => r.min === null),
+        distinct_counts: ranges.map(r => r.distinctCount)
+      }
+    };
+  });
+  const colors = ['#1d5dc5', '#087d78', '#7952b3'];
+  const pale = ['#eaf1ff', '#e4f5f1', '#f1ebfa'];
+  const ink = '#172b44', muted = '#52637a', border = '#d8e0e8', amber = '#946000';
+  const $ = id => document.getElementById(id);
+  const owner = cc => data.column_chunk_index.findIndex((v, c, a) => cc >= v && cc < a[c + 1]);
+  const chunkForPage = p => data.page_index.findIndex((v, cc, a) => p >= v && p < a[cc + 1]);
+  const chunkLabel = cc => `C${owner(cc)} × chunk ${cc - data.column_chunk_index[owner(cc)]}`;
+  let exportSvg = '';
+  function options(id, values, value) {
+    $(id).replaceChildren(...values.map(([v, name]) => new Option(name, v)));
+    $(id).value = value;
+  }
+  function setColumn(c, localChunk = 0, localPage = 0) {
+    options('chunk', Array.from({length: data.column_chunk_index[c + 1] - data.column_chunk_index[c]}, (_, j) => [j, `chunk ${j} · cc=${data.column_chunk_index[c] + j}`]), localChunk);
+    setChunk(localPage);
+  }
+  function setChunk(localPage = 0) {
+    const cc = data.column_chunk_index[+$('column').value] + +$('chunk').value;
+    options('page', Array.from({length: data.page_index[cc + 1] - data.page_index[cc]}, (_, j) => [j, `page ${j} · p=${data.page_index[cc] + j}`]), localPage);
+    render();
+  }
+  function setStatsRange(index = 0) {
+    const ranges = rowRangeStatistics[+$('stats-granularity').value].columns[+$('stats-column').value];
+    options('stats-range', ranges.length ? ranges.map((r, i) => [i, `rows [${r.start}, ${r.end})`]) : [[-1, 'No ranges for this column']], ranges.length ? Math.min(index, ranges.length - 1) : -1);
+    $('stats-range').disabled = !ranges.length;
+  }
+  function render() {
+    const c = +$('column').value, j = +$('chunk').value, q = +$('page').value;
+    const cc = data.column_chunk_index[c] + j, p = data.page_index[cc] + q;
+    const r = data.region_ordinals[cc], base = data.region_offsets[r], limit = data.region_offsets[r + 1];
+    const lo = data.page_index[cc], hi = data.page_index[cc + 1], last = p + 1 === hi;
+    const rel = data.relative_page_offsets[p], start = base + rel;
+    const end = last ? limit : base + data.relative_page_offsets[p + 1];
+    const present = $('offsets').checked, accent = colors[c];
+    const dr = data.dictionary_regions[cc];
+    const chunkCell = 504 / data.region_ordinals.length, pageCell = 504 / data.relative_page_offsets.length;
+    let out = [];
+    const text = (x, y, s, size = 14, fill = ink, weight = 400, anchor = 'start', mono = false) => out.push(`<text x="${x}" y="${y}" fill="${fill}" font-size="${size}" font-weight="${weight}" text-anchor="${anchor}" font-family="${mono ? 'monospace' : 'Arial, sans-serif'}">${s}</text>`);
+    const box = (x, y, w, h, fill = 'white', stroke = border, radius = 8, sw = 1) => out.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${radius}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>`);
+    const line = (x1, y1, x2, y2, stroke = border, width = 1, arrow = false) => out.push(`<path d="M${x1},${y1} L${x2},${y2}" fill="none" stroke="${stroke}" stroke-width="${width}"${arrow ? ' marker-end="url(#arrow)"' : ''}/>`);
+    const array = (name, x, y, cell, selected, endpoint = -1, mutedValues = false, colorFor = () => '#fff', highlight = accent, highlightFill = pale[c]) => {
+      data[name].forEach((v, i) => {
+        const active = selected.includes(i), terminal = i === endpoint;
+        text(x + i * cell + (cell - 5) / 2, y - 9, `[${i}]`, 11, muted, 400, 'middle', true);
+        box(x + i * cell, y, cell - 5, 43, active ? highlightFill : colorFor(i), active ? highlight : terminal ? '#98a6b7' : border, 5, active ? 2 : 1);
+        text(x + i * cell + (cell - 5) / 2, y + 27, mutedValues ? '—' : v, cell < 45 ? 14 : 17, active ? highlight : ink, active ? 700 : 500, 'middle', true);
+      });
+    };
+    const svg = (height, title, description, content) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 ${height}" role="img"><title>${title}</title><desc>${description}</desc><rect width="1200" height="${height}" fill="white"/>${content}</svg>`;
+    const description = `${chunkLabel(cc)} has global chunk index ${cc} and region ${r}, bytes [${base}, ${limit}). ${present ? `Page ${q} has global page index ${p}, bytes [${start}, ${end}).` : 'Relative offsets are omitted; interior page locations require header scanning.'}`;
+
+    // Explain physical regions before introducing metadata indexes or page offsets.
+    out.push('<defs><pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse"><path d="M-1,1 L1,-1 M0,7 L7,0 M6,8 L8,6" stroke="#c2ccd8" stroke-width="1"/></pattern></defs>');
+    text(28, 36, '1 · Start with the region map', 22, ink, 700);
+    text(1172, 36, `${data.column_chunk_index.length - 1} columns · ${data.region_ordinals.length} chunks · ${data.relative_page_offsets.length} data pages · ${data.region_offsets.length - 1} regions`, 13, muted, 400, 'end');
+    text(28, 65, 'Each region is a contiguous byte interval. Its contents follow one of these three rules:', 15, muted);
+    box(28, 82, 368, 84, '#eaf1ff');
+    text(46, 108, '1. Contiguous data pages', 16, colors[0], 700);
+    text(46, 132, 'All data pages of one chunk: headers + bodies.', 13, ink);
+    text(46, 153, 'At most one dictionary for this entire region.', 13, ink);
+    box(416, 82, 368, 84, '#fff6e3', '#ddcda8');
+    text(434, 108, '2. Single dictionary page', 16, amber, 700);
+    text(434, 132, 'Exactly one dictionary page: header + body.', 13, ink);
+    text(434, 153, 'Example: R0 occupies bytes [100, 200).', 13, amber);
+    box(804, 82, 368, 84, '#f1f4f7');
+    text(822, 108, '3. Arbitrary data', 16, muted, 700);
+    text(822, 132, 'Other contents, such as opaque data,', 13, ink);
+    text(822, 153, 'indexes, or extensions. Example: R2 and R9.', 13, ink);
+    text(28, 193, 'C0 has 3 chunks; C1 and C2 have 2 each. Each column’s chunks remain in logical order.', 13, muted);
+    const x0 = 48, width = 1100, scale = width / (data.region_offsets.at(-1) - data.region_offsets[0]), mapY = 232;
+    for (let region = 0; region < data.region_offsets.length - 1; region++) {
+      const x = x0 + (data.region_offsets[region] - data.region_offsets[0]) * scale;
+      const w = (data.region_offsets[region + 1] - data.region_offsets[region]) * scale;
+      const k = data.region_ordinals.indexOf(region), selected = region === r;
+      const col = region === 0 ? amber : k < 0 ? muted : colors[owner(k)];
+      if (region === 0) text(x, mapY - 13, 'R0 · dictionary', 12, amber, 700);
+      else text(x + w / 2, mapY - 13, `R${region}`, 12, selected ? accent : muted, selected ? 700 : 400, 'middle');
+      box(x, mapY, w, 58, region === 0 ? '#fff0c7' : k < 0 ? 'url(#hatch)' : selected ? accent : pale[owner(k)], region === 0 ? '#ddcda8' : 'white', 0);
+      text(x + w / 2, mapY + 25, k < 0 ? region === 0 ? 'D' : 'O' : chunkLabel(k), 12, selected ? 'white' : col, 700, 'middle');
+      if (k >= 0) text(x + w / 2, mapY + 45, `global cc = ${k}`, 11, selected ? 'white' : col, 400, 'middle');
+      if (selected) box(x, mapY, w, 58, 'none', accent, 0, 3);
+      if (region === dr) box(x, mapY, w, 58, 'none', amber, 0, 3);
+    }
+    data.region_offsets.forEach((v, i) => {
+      const x = x0 + (v - data.region_offsets[0]) * scale;
+      line(x, mapY + 60, x, mapY + 68);
+      text(x, mapY + (i % 2 ? 95 : 81), v, 11, i === r || i === r + 1 ? accent : muted, 400, 'middle', true);
+    });
+    text(48, 352, 'D = one dictionary page in R0, [100, 200)', 12, amber, 600);
+    text(340, 352, 'O = arbitrary data', 12, muted);
+    text(1148, 352, 'Physical file order → · widths proportional to bytes', 12, muted, 400, 'end');
+    box(28, 371, 1144, 132, '#f8fafc');
+    text(48, 400, 'region_offsets', 16, ink, 600, 'start', true);
+    text(1152, 400, 'DataLocation · INT64 · R + 1 absolute boundaries', 12, muted, 400, 'end');
+    array('region_offsets', 48, 428, 1100 / data.region_offsets.length, [r, r + 1], data.region_offsets.length - 1);
+    text(48, 493, `Region r = [region_offsets[r], region_offsets[r + 1])     R${r} = [${base}, ${limit})`, 14, accent, 700, 'start', true);
+    text(28, 532, 'The map stores boundaries. Chunk and dictionary references supply the region labels shown above.', 13, muted);
+    const regionContent = out.join('');
+    const regionDescription = 'A region contains contiguous data pages of one column chunk, a single dictionary page, or arbitrary data. R0 is a single dictionary page occupying [100, 200). ' + description;
+    $('region-diagram').innerHTML = svg(560, 'The physical region map and its three content rules', regionDescription, regionContent);
+
+    out = [];
+    out.push('<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="none" stroke="#71849b" stroke-width="1.2"/></marker></defs>');
+    text(28, 36, '2 · Select a column and chunk', 22, ink, 700);
+    text(28, 65, `${chunkLabel(cc)} → global chunk index cc = ${cc} → region R${r} → bytes [${base}, ${limit})`, 17, accent, 600);
+    box(28, 88, 548, 168, '#f8fafc');
+    box(624, 88, 548, 168, '#f8fafc');
+    text(48, 117, 'column_chunk_index', 15, ink, 600, 'start', true);
+    text(556, 117, 'DataLayout · INT32 · C + 1', 11, muted, 400, 'end');
+    array('column_chunk_index', 48, 147, 74, [c, c + 1], 3);
+    text(365, 174, `C${c} → [${data.column_chunk_index[c]}, ${data.column_chunk_index[c + 1]})`, 14, accent, 700, 'start', true);
+    text(48, 218, `cc = column_chunk_index[${c}] + ${j} = ${data.column_chunk_index[c]} + ${j} = ${cc}`, 14, accent, 700, 'start', true);
+    text(48, 243, 'Chunk numbers restart at 0 per column; global cc indexes the stream.', 12, muted);
+    text(644, 117, 'region_ordinals', 15, ink, 600, 'start', true);
+    text(1152, 117, 'DataLocation · INT32 · K', 11, muted, 400, 'end');
+    array('region_ordinals', 644, 147, chunkCell, [cc], -1, false, i => pale[owner(i)]);
+    for (let col = 0; col < 3; col++) {
+      const left = 644 + data.column_chunk_index[col] * chunkCell, right = 644 + data.column_chunk_index[col + 1] * chunkCell - 5;
+      line(left, 199, right, 199, colors[col], 2);
+      text((left + right) / 2, 216, `C${col}: chunks 0–${data.column_chunk_index[col + 1] - data.column_chunk_index[col] - 1}`, 11, colors[col], col === c ? 700 : 400, 'middle');
+    }
+    text(644, 243, `region_ordinals[${cc}] = ${r} → use R${r}'s boundaries in the map above`, 13, accent, 700);
+    line(579, 168, 619, 168, '#71849b', 1.5, true);
+    text(600, 154, 'cc', 11, muted, 400, 'middle', true);
+
+    text(28, 301, '3 · Select a page within that chunk', 22, ink, 700);
+    text(1172, 301, `Local page ${q} → global page index p = ${p}`, 14, accent, 600, 'end');
+    box(28, 324, 548, 170, '#f8fafc');
+    box(624, 324, 548, 170, '#f8fafc');
+    text(48, 353, 'page_index', 15, ink, 600, 'start', true);
+    text(556, 353, 'DataLayout · INT32 · K + 1', 11, muted, 400, 'end');
+    array('page_index', 48, 383, 504 / data.page_index.length, [cc, cc + 1], data.page_index.length - 1);
+    text(48, 453, `cc ${cc} → pages [${lo}, ${hi})     p = ${lo} + ${q} = ${p}`, 14, accent, 700, 'start', true);
+    text(48, 480, 'This slice selects the chunk’s entries in all page-metadata streams.', 12, muted);
+    text(644, 353, 'relative_page_offsets', 15, ink, 600, 'start', true);
+    text(1152, 353, 'INT64 · P · optional', 11, muted, 400, 'end');
+    array('relative_page_offsets', 644, 383, pageCell, present ? [p] : [], -1, !present, i => pale[owner(chunkForPage(i))]);
+    for (let k = 0; k < data.region_ordinals.length; k++) {
+      const left = 644 + data.page_index[k] * pageCell, right = 644 + data.page_index[k + 1] * pageCell - 5;
+      line(left, 435, right, 435, colors[owner(k)], 2);
+      text((left + right) / 2, 452, `cc=${k}`, 11, colors[owner(k)], k === cc ? 700 : 400, 'middle');
+    }
+    text(644, 480, present ? 'Offsets restart at 0 per chunk; add the selected region’s start.' : 'Stream omitted: scan page headers for interior page locations.', 12, present ? muted : amber);
+    line(579, 404, 619, 404, '#71849b', 1.5, true);
+    text(600, 390, 'p', 11, muted, 400, 'middle', true);
+
+    box(28, 520, 1144, 270, '#f8fafc');
+    text(48, 552, `Inside R${r}: ${chunkLabel(cc)}`, 18, ink, 700);
+    text(1152, 552, `Region start ${base} → region end ${limit}`, 13, accent, 600, 'end');
+    const z = 1100 / (limit - base), zy = 592;
+    if (present) {
+      for (let g = lo; g < hi; g++) {
+        const a = data.relative_page_offsets[g], b = g + 1 < hi ? data.relative_page_offsets[g + 1] : limit - base;
+        const x = 48 + a * z, w = (b - a) * z;
+        text(x + (g === lo ? 0 : 4), zy - 9, `+${a}`, 11, muted, 400, 'start', true);
+        box(x, zy, w, 42, g === p ? accent : pale[c], 'white', 0);
+        text(x + w / 2, zy + 27, `page ${g - lo} · p=${g} · ${b - a} bytes`, 14, g === p ? 'white' : accent, 600, 'middle');
+      }
+      text(1148, zy - 9, `+${limit - base} (region end)`, 11, muted, 400, 'end', true);
+      text(48, 668, `START = region_offsets[${r}] + relative_page_offsets[${p}] = ${base} + ${rel} = ${start}`, 16, accent, 700, 'start', true);
+      text(48, 697, last ? `END   = region_offsets[${r + 1}] = ${end}   (last page → region end)` : `END   = ${base} + relative_page_offsets[${p + 1}] = ${end}   (next page header)`, 15, ink, 400, 'start', true);
+      text(48, 741, `Selected data-page range: [${start}, ${end}) · ${end - start} bytes`, 22, accent, 700);
+      text(48, 773, 'Includes the page header and stored body. Metadata and any required dictionary are separate reads.', 13, muted);
+    } else {
+      box(48, zy, 1100, 42, '#fff6e3', '#ddcda8', 0);
+      text(598, zy + 27, 'Start at the region base; read page headers to find subsequent page boundaries.', 15, amber, 500, 'middle');
+      text(48, 668, `${chunkLabel(cc)} remains directly located: [${base}, ${limit})`, 17, ink, 600);
+      text(48, 699, q === 0 ? `Page 0 starts at ${base}. Its extent requires reading the header.` : `Page ${q} requires scanning ${q} preceding page header${q === 1 ? '' : 's'} to locate its start.`, 16, amber, 500);
+      text(48, 741, 'Read each header, then skip its stored body. The final page ends at the region end.', 15, muted);
+    }
+    const selectionContent = out.join('');
+    $('diagram').innerHTML = svg(816, 'Select a column chunk, then a page', description, selectionContent);
+
+    out = [];
+    text(28, 36, '4 · Resolve the chunk’s dictionary', 22, ink, 700);
+    box(650, 12, 522, 44, '#fff0c7', '#ddcda8');
+    text(911, 40, 'No dictionary switching within a data-page region', 16, amber, 700, 'middle');
+    text(28, 65, 'ColumnChunkMetadata · 2: required StreamLocation dictionary_regions', 14, muted, 400, 'start', true);
+    box(28, 88, 548, 184, '#f8fafc');
+    text(48, 117, 'dictionary_regions', 15, ink, 600, 'start', true);
+    text(556, 117, 'INT32 · K entries · nullable', 11, muted, 400, 'end');
+    array('dictionary_regions', 48, 147, chunkCell, [cc], -1, false, i => data.dictionary_regions[i] === null ? '#fff' : '#fff6e3', dr === null ? muted : amber, dr === null ? '#edf1f5' : '#fff0c7');
+    for (let col = 0; col < 3; col++) {
+      const left = 48 + data.column_chunk_index[col] * chunkCell, right = 48 + data.column_chunk_index[col + 1] * chunkCell - 5;
+      line(left, 199, right, 199, colors[col], 2);
+      text((left + right) / 2, 216, `C${col}: chunks 0–${data.column_chunk_index[col + 1] - data.column_chunk_index[col] - 1}`, 11, colors[col], col === c ? 700 : 400, 'middle');
+    }
+    text(48, 248, `${chunkLabel(cc)} selects the entry at global cc = ${cc}.`, 13, accent, 600);
+    line(579, 168, 619, 168, '#71849b', 1.5, true);
+    text(600, 154, dr === null ? 'null' : `R${dr}`, 11, dr === null ? muted : amber, 600, 'middle', true);
+    box(624, 88, 548, 184, dr === null ? '#f8fafc' : '#fff6e3', dr === null ? border : '#ddcda8');
+    text(644, 119, `dictionary_regions[${cc}] = ${dr === null ? 'null' : dr}`, 17, dr === null ? muted : amber, 700, 'start', true);
+    let dictionaryDescription;
+    if (dr === null) {
+      text(644, 155, `${chunkLabel(cc)} has no dictionary.`, 18, ink, 600);
+      text(644, 191, 'No dictionary region lookup or dictionary-page read.', 14, muted);
+      text(644, 239, 'Select C0 chunk 0 or 2 to follow a dictionary reference.', 13, muted);
+      dictionaryDescription = `${chunkLabel(cc)} has a null dictionary_regions entry: no dictionary.`;
+    } else {
+      const dictStart = data.region_offsets[dr], dictEnd = data.region_offsets[dr + 1];
+      text(644, 155, `R${dr} = [region_offsets[${dr}], region_offsets[${dr + 1}])`, 14, amber, 600, 'start', true);
+      text(644, 191, `[${dictStart}, ${dictEnd}) · ${dictEnd - dictStart} bytes · one dictionary page`, 17, amber, 700);
+      text(644, 218, 'Region contents: one page header + one page body.', 14, amber, 700);
+      text(644, 248, `Every dictionary-encoded page in R${r} uses this same dictionary.`, 13, amber, 600);
+      dictionaryDescription = `${chunkLabel(cc)} references dictionary region ${dr}, bytes [${dictStart}, ${dictEnd}), one complete dictionary page.`;
+    }
+    text(48, 308, 'Many chunks → one region → one dictionary page', 15, amber, 700);
+    text(48, 333, 'cc=0 and cc=2 share R0’s single page, at [100, 200).', 13, ink);
+    text(644, 308, 'Null: dictionary_regions[1] = null.', 15, muted, 700);
+    text(644, 333, 'C0 × chunk 1 has no dictionary to locate.', 13, ink);
+    text(28, 377, 'One dictionary per chunk, if present. Changing dictionaries requires a new chunk and a new data-page region.', 13, amber, 600);
+    text(28, 404, 'Pages may use non-dictionary encodings; is_fully_dictionary_encoded indicates whether all pages use the dictionary.', 12, muted);
+    const dictionaryContent = out.join('');
+    dictionaryDescription = 'Each dictionary region contains exactly one complete dictionary page. Multiple chunks may share that same page. Within a data-page region, all dictionary-encoded pages use the chunk’s one referenced dictionary; switching dictionaries requires a new chunk and data region. Pages may use non-dictionary encodings. ' + dictionaryDescription;
+    $('dictionary-diagram').innerHTML = svg(432, 'Dictionary regions: references, sharing, and null entries', dictionaryDescription, dictionaryContent);
+    out = [];
+    const sc = +$('stats-column').value, sg = +$('stats-granularity').value, sr = +$('stats-range').value;
+    const layer = rowRangeStatistics[sg], ranges = layer.columns[sc], selected = ranges[sr];
+    const rangeBase = layer.column_range_starts[sc], rangeLimit = layer.column_range_starts[sc + 1], s = selected ? rangeBase + sr : null;
+    const flatRanges = layer.columns.flatMap((columnRanges, col) => columnRanges.map(range => ({ ...range, col })));
+    const emptyColumns = layer.columns.flatMap((columnRanges, col) => columnRanges.length ? [] : [`C${col} [${layer.column_range_starts[col]}, ${layer.column_range_starts[col + 1]})`]);
+    const statColor = colors[sc], statFill = pale[sc];
+    const show = v => v === null ? 'null' : String(v);
+    const statsCells = (label, values, y, active) => {
+      text(48, y + 3, label, 13, ink, 500, 'start', true);
+      if (!values.length) { text(316, y + 3, '[] — no entries for this column', 13, muted); return; }
+      const cell = Math.min(72, 832 / values.length);
+      values.forEach((v, i) => {
+        const x = 316 + i * cell, on = active.includes(i);
+        box(x, y - 19, cell - 4, 30, on ? statFill : '#fff', on ? statColor : border, 4, on ? 2 : 1);
+        text(x + (cell - 4) / 2, y + 2, show(v), 13, on ? statColor : ink, on ? 700 : 400, 'middle', true);
+      });
+    };
+    text(28, 36, '5 · Statistics are defined by row ranges', 22, ink, 700);
+    text(1172, 36, `Flat INT32 · FileInfo.num_rows = ${numRows}`, 13, muted, 400, 'end');
+    text(28, 65, 'Ranges use row positions and can cross page, chunk, or row-group boundaries. Each column chooses its own granularities.', 15, muted);
+    const listHeight = 76 + rowRangeStatistics.length * 72, listBottom = 86 + listHeight;
+    box(28, 86, 1144, listHeight, '#f8fafc');
+    text(48, 112, 'FileMetaData.row_range_statistics = [', 16, ink, 600, 'start', true);
+    rowRangeStatistics.forEach((entry, g) => {
+      const y = 128 + g * 72;
+      box(48, y, 1104, 64, sg === g ? statFill : '#fff', sg === g ? statColor : border, 6, sg === g ? 2 : 1);
+      text(64, y + 23, `[${g}] ${entry.label}`, 16, sg === g ? statColor : ink, 700);
+      text(345, y + 23, `column_range_starts = [${entry.column_range_starts.join(', ')}] · range indexes`, 14, ink, 500, 'start', true);
+      text(1136, y + 23, `S = ${entry.statistics.range_start_rows.length}`, 14, muted, 400, 'end');
+      entry.columns.forEach((columnRanges, col) => {
+        const starts = columnRanges.map(r => r.start), x = 64 + col * 365;
+        const example = col === 0 ? [' · row groups', ' · pages', ' · custom'][g] ?? '' : '';
+        text(x, y + 49, starts.length ? `C${col}: row starts [${starts.join(', ')}]${example}` : `C${col}: no ranges in this entry`, 13, starts.length ? colors[col] : muted, col === sc ? 700 : 400, 'start', true);
+      });
+    });
+    text(48, listBottom - 15, '… additional entries as needed ]', 14, muted, 400, 'start', true);
+    text(1152, listBottom - 15, sourceColumns.map((_, col) => `C${col}: ${rowRangeStatistics.filter(entry => entry.columns[col].length).length} granularit${rowRangeStatistics.filter(entry => entry.columns[col].length).length === 1 ? 'y' : 'ies'}`).join(' · '), 13, muted, 600, 'end');
+    text(28, listBottom + 26, 'Equal adjacent column_range_starts values mean no statistics for that column in that entry.', 15, statColor, 600);
+    text(28, listBottom + 49, 'In each entry, a column with ranges partitions [0, FileInfo.num_rows). Each range ends at the next start for that column, or num_rows for its final range.', 13, muted);
+
+    const timelineTitle = listBottom + 85, stripY = listBottom + 155;
+    text(28, timelineTitle, `Entry [${sg}] · Row ranges in column order`, 18, ink, 700);
+    text(1172, timelineTitle, `Final range end = FileInfo.num_rows = ${numRows}`, 12, statColor, 600, 'end');
+    text(28, timelineTitle + 22, 'C0 → C1 → C2 · Each column uses its own row numbers; bar widths show the number of rows.', 12, muted);
+    const participatingColumns = layer.columns.filter(columnRanges => columnRanges.length).length;
+    const columnGap = 24, columnWidth = (1100 - (participatingColumns - 1) * columnGap) / participatingColumns;
+    const rowScale = columnWidth / numRows;
+    let columnX = 48;
+    layer.columns.forEach((columnRanges, col) => {
+      if (!columnRanges.length) return;
+      const first = layer.column_range_starts[col], limit = layer.column_range_starts[col + 1];
+      box(columnX, stripY - 42, columnWidth, 24, pale[col], colors[col], 4);
+      text(columnX + columnWidth / 2, stripY - 25, `C${col} · s in [${first}, ${limit})`, 13, colors[col], 700, 'middle', true);
+      columnRanges.forEach((range, i) => {
+        const x = columnX + range.start * rowScale, w = (range.end - range.start) * rowScale;
+        const active = sc === col && sr === i;
+        box(x, stripY, w, 53, active ? colors[col] : pale[col], active ? colors[col] : 'white', 0, active ? 2 : 1);
+        text(x + w / 2, stripY + 20, `s = ${first + i}`, 12, active ? 'white' : colors[col], 600, 'middle');
+        text(x + w / 2, stripY + 40, `[${range.start}, ${range.end})`, 12, active ? 'white' : muted, 400, 'middle', true);
+      });
+      [...columnRanges.map(r => r.start), numRows].forEach(row => text(columnX + row * rowScale, stripY - 6, row, 10, row === numRows ? colors[col] : muted, row === numRows ? 700 : 400, 'middle', true));
+      columnX += columnWidth + columnGap;
+    });
+    const streamsY = stripY + 100;
+    text(28, streamsY - 22, emptyColumns.length ? `Empty slices: ${emptyColumns.join(' · ')}. These columns occupy no space in the line or streams.` : 'Row numbers restart at 0 for each column. Range indexes s continue across columns in the flattened order.', 13, muted);
+    out.push(`<g transform="translate(0,${streamsY})">`);
+    const streamPanelHeight = 360, detailOffset = streamPanelHeight - 216;
+    box(28, 0, 1144, streamPanelHeight, '#f8fafc');
+    text(48, 28, `Entry [${sg}] · Streams flattened in column order`, 18, ink, 700);
+    text(1152, 28, `C${sc}: ranges [${rangeBase}, ${rangeLimit}); bounds [${2 * rangeBase}, ${2 * rangeLimit})`, 13, statColor, 600, 'end');
+    statsCells('column_range_starts', layer.column_range_starts, 60, [sc, sc + 1]);
+    const flatX = 316, flatCell = 832 / flatRanges.length;
+    text(48, 105, 'Column slices', 13, ink, 600);
+    layer.columns.forEach((columnRanges, col) => {
+      if (!columnRanges.length) return;
+      const first = layer.column_range_starts[col], limit = layer.column_range_starts[col + 1];
+      const x = flatX + first * flatCell, width = columnRanges.length * flatCell;
+      box(x, 87, width - 4, 26, pale[col], colors[col], 3);
+      text(x + (width - 4) / 2, 105, `C${col} · [${first}, ${limit})`, 13, colors[col], 700, 'middle');
+    });
+    text(48, 135, 'Range index s', 13, ink, 600);
+    text(48, 235, 'Bound positions: min, max', 12, muted);
+    flatRanges.forEach((range, index) => {
+      text(flatX + (index + .5) * flatCell - 2, 135, `s = ${index}`, 12, colors[range.col], 600, 'middle', true);
+      for (let bound = 0; bound < 2; bound++) text(flatX + (index + (bound + .5) / 2) * flatCell - 2, 235, `${bound ? 'max' : 'min'}[${2 * index + bound}]`, 10, muted, 400, 'middle', true);
+    });
+    const flatStatsCells = (label, values, y, paired = false) => {
+      text(48, y + 2, label, 13, ink, 500, 'start', true);
+      const factor = paired ? 2 : 1, width = flatCell / factor;
+      values.forEach((value, i) => {
+        const index = Math.floor(i / factor), col = flatRanges[index].col, active = s === index, x = flatX + i * width;
+        box(x, y - 19, width - 4, 30, active ? colors[col] : pale[col], colors[col], 4, active ? 2 : 1);
+        text(x + (width - 4) / 2, y + 2, show(value), 12, active ? 'white' : ink, active ? 700 : 400, 'middle', true);
+      });
+    };
+    flatStatsCells('Row intervals (derived)', flatRanges.map(range => `[${range.start}, ${range.end})`), 165);
+    flatStatsCells('range_start_rows', layer.statistics.range_start_rows, 205);
+    flatStatsCells('min_max_int32', layer.statistics.min_max_int32, 264, true);
+    flatStatsCells('min_max_is_exact', layer.statistics.min_max_is_exact, 303, true);
+    text(48, 343, emptyColumns.length ? `Empty slices: ${emptyColumns.join(' · ')}. These columns contribute no entries.` : 'Each range has one row start and two bounds. Every list entry has its own flattened streams and range indexes.', 12, muted);
+    out.push(`<g transform="translate(0,${detailOffset})">`);
+    text(28, 245, `C${sc} source values: [${sourceColumns[sc].map(show).join(', ')}]`, 13, muted, 400, 'start', true);
+    box(28, 301, 1144, 160, selected ? '#fff' : '#f8fafc');
+    if (selected) {
+      text(28, 280, `Selected rows [${selected.start}, ${selected.end}) → range index s = ${s} → paired positions [${2*s}, ${2*s+2})`, 18, statColor, 700);
+      box(28, 301, 1144, 30, '#edf1f5', 'none', 0);
+      text(48, 321, 'Statistic', 13, ink, 700);
+      text(270, 321, 'Source statistics / exact example values', 13, ink, 700);
+      text(700, 321, 'RangeStatistics representation', 13, ink, 700);
+      const compareRows = [
+        ['Min / max', `[${show(selected.min)}, ${show(selected.max)}]`, `min_max_int32[${2*s}:${2*s+2}] = [${show(selected.min)}, ${show(selected.max)}]`],
+        ['Bound exactness', `[${show(selected.exact)}, ${show(selected.exact)}] (supplied when bounds exist)`, `min_max_is_exact = [${show(selected.exact)}, ${show(selected.exact)}]`],
+        ['Nulls', `null_count = ${selected.nullCount}`, `contains_null[${s}] = ${selected.nullCount > 0} (presence only)`],
+        ['Distinct values', `distinct_count = ${selected.distinctCount} (when supplied)`, `distinct_counts[${s}] = ${selected.distinctCount}`]
+      ];
+      compareRows.forEach((row, i) => row.forEach((value, col) => text([48, 270, 700][col], 356 + i * 27, value, 13, i === 2 ? amber : ink, col === 0 ? 600 : 400)));
+    } else {
+      text(28, 280, `column_range_starts[${sc}] = column_range_starts[${sc + 1}] = ${rangeBase} → empty slice`, 18, statColor, 700);
+      text(48, 340, `No statistics for C${sc} in entry [${sg}]`, 22, muted, 700);
+      text(48, 375, `The column still has ${numRows} rows. No range entries or paired bounds are stored for it in this entry.`, 16, ink);
+      text(48, 411, 'This does not mean all-null data. Use another available entry or read the data.', 15, muted);
+      text(48, 440, 'Empty column slices contribute zero entries to every per-range stream.', 13, muted);
+    }
+    box(28, 479, 1144, 116, '#fff6e3', '#ddcda8');
+    text(48, 506, 'Exact bounds can be retained at any chosen row granularity', 17, amber, 700);
+    text(48, 531, 'Existing row intervals and min/max bounds can be retained exactly. Numeric null/NaN counts and level histograms are absent.', 13, ink);
+    text(48, 553, 'boundary_orders has one value per column per entry; combining differently ordered chunks may require UNORDERED.', 13, ink);
+    text(48, 575, selected ? `Unknown bounds stay null. Here is_all_null[${s}] = ${selected.min === null}; do not add counts from overlapping granularities.` : 'Missing ranges mean unavailable statistics. Other entries can still provide statistics for the same column.', 13, ink);
+    out.push('</g></g>');
+    const statsHeight = streamsY + detailOffset + 621, statsContent = out.join('');
+    const statsDescription = `${rowRangeStatistics.length} illustrative granularities, with no fixed count. C0 has three, C1 two, and C2 one. Entry ${sg} shows its ${flatRanges.length} ranges on one horizontal line in column order, with matching colors and range indexes in the flattened streams. Row numbers restart for each participating column; empty columns contribute no entries. In each entry, a column with ranges partitions [0, FileInfo.num_rows). A range ends at the next start for that column; its final range ends at FileInfo.num_rows = ${numRows}. ` + (selected ? `Entry ${sg}, column ${sc}, rows [${selected.start}, ${selected.end}), bounds [${show(selected.min)}, ${show(selected.max)}].` : `Column ${sc} has no statistics in entry ${sg}; its column index slice is empty, not an all-null range.`);
+    $('stats-diagram').innerHTML = svg(statsHeight, 'Per-column statistics: independent granularities and empty slices', statsDescription, statsContent);
+    out = [];
+    const encryptShared = $('protection-mode').value === 'footer-key', hasKey = $('pme-key').checked;
+    $('pme-key-label').textContent = encryptShared ? 'Footer key available' : 'C0 column key available';
+    const protectedColor = '#7952b3', protectedFill = '#f1ebfa';
+    const sharedEntries = rowRangeStatistics.map((entry, g) => {
+      const indexes = [0];
+      entry.columns.forEach((ranges, col) => indexes.push(indexes.at(-1) + (col === 0 ? 0 : ranges.length)));
+      return { g, indexes };
+    }).filter(entry => entry.indexes.at(-1) > 0);
+    const columnEntries = rowRangeStatistics.map((entry, g) => ({ g, ranges: entry.columns[0] })).filter(entry => entry.ranges.length);
+
+    text(28, 36, '6 · PME in the current Modular Footer V2 design', 22, ink, 700);
+    text(28, 65, 'The footer key authenticates the visible FileMetaData catalog. Encryption applies to FileInfo, streams, or column-statistics blocks.', 14, muted);
+    const cases = [
+      ['1 · FileInfo + shared streams encrypted', 'encrypted_file_info + crypto_metadata are present.', 'FileInfo and every shared stream use the footer key.', 'The FileMetaData catalog stays visible and signed.'],
+      ['2 · Selected column statistics encrypted', 'file_info + crypto_metadata are present; shared streams are signed.', 'C0’s complete statistics block uses its own column key.', 'FileInfo and the C0 block descriptor stay visible.']
+    ];
+    cases.forEach((entry, i) => {
+      const x = i === 0 ? 28 : 624, active = encryptShared === (i === 0);
+      box(x, 88, 548, 128, active ? protectedFill : '#f8fafc', active ? protectedColor : border, 8, active ? 2 : 1);
+      text(x + 20, 117, entry[0], 20, active ? protectedColor : ink, 700);
+      entry.slice(1).forEach((label, j) => text(x + 20, 145 + j * 25, label, 13, ink));
+    });
+    text(28, 242, 'A separate column-statistics key can also be used when FileInfo and shared streams are encrypted.', 13, muted);
+
+    text(28, 276, 'Current V2 · file layout', 18, ink, 700);
+    const segments = [
+      ['Source data', 'data encryption is separate', 2, '#edf1f5'],
+      ['Shared streams', encryptShared ? 'encrypted · footer key' : 'plaintext + signature', 3, encryptShared ? protectedFill : '#e4f5f1'],
+      ...(!encryptShared ? [['C0 statistics', 'encrypted · C0 key', 2, '#fff0c7']] : []),
+      ['FileMetaData', encryptShared ? 'visible + inline encrypted_file_info' : 'visible: file_info + C0 descriptor', 4, '#eaf1ff'],
+      ['Signature', '28 bytes', 1, protectedFill],
+      ['Offset + PAR3', 'u64 absolute footer offset', 2, '#edf1f5']
+    ];
+    const segmentUnits = segments.reduce((sum, segment) => sum + segment[2], 0);
+    let segmentX = 28;
+    segments.forEach(([label, detail, units, fill]) => {
+      const width = 1144 * units / segmentUnits;
+      box(segmentX, 296, width, 82, fill, '#fff', 0);
+      text(segmentX + width / 2, 329, label, 14, ink, 700, 'middle');
+      text(segmentX + width / 2, 357, detail, 10, muted, 400, 'middle');
+      segmentX += width;
+    });
+    text(28, 402, 'Both cases use the same PAR3 trailer. The signature authenticates all serialized FileMetaData, including its crypto and stream descriptors.', 13, muted);
+
+    text(28, 438, 'How the reader opens the metadata', 18, ink, 700);
+    const steps = encryptShared ? [
+      ['1. Locate FileMetaData', 'Read the last 12 bytes: offset + PAR3.', 'Fetch FileMetaData at that offset.'],
+      ['2. Authenticate the catalog', 'Resolve key from crypto_metadata.', hasKey ? 'Verify the 28-byte footer signature.' : 'No footer key: cannot authenticate.'],
+      ['3. Decrypt FileInfo', hasKey ? 'Open inline encrypted_file_info.' : 'FileInfo remains encrypted.', hasKey ? 'Recover schema, row count, created_by.' : 'Schema and row count unavailable.'],
+      ['4. Read selected streams', hasKey ? 'Fetch the whole selected stream.' : 'Shared stream values stay encrypted.', hasKey ? 'Authenticate/decrypt, then decode.' : 'Visible descriptors are unverified.']
+    ] : [
+      ['1. Locate FileMetaData', 'Read the last 12 bytes: offset + PAR3.', 'Fetch FileMetaData at that offset.'],
+      ['2. Authenticate the catalog', 'Verify with the footer key.', 'That key is available in this example.'],
+      ['3. Read shared metadata', 'Use plaintext file_info.', 'Verify each selected stream’s signature.'],
+      [hasKey ? '4. Open C0 statistics' : '4. Use C1/C2 statistics', hasKey ? 'Resolve C0 key; fetch its whole block.' : 'C0 key absent: statistics unavailable.', hasKey ? 'Authenticate/decrypt, then decode.' : 'C0’s encrypted block stays unreadable.']
+    ];
+    steps.forEach((step, i) => {
+      const x = 28 + i * 290, locked = !hasKey && i >= (encryptShared ? 1 : 3);
+      box(x, 458, 274, 112, locked ? '#fff6e3' : '#f8fafc', locked ? '#ddcda8' : border);
+      text(x + 12, 487, step[0], 15, ink, 700);
+      text(x + 12, 516, step[1], 12, muted);
+      text(x + 12, 543, step[2], 12, muted);
+      if (i < 3) text(x + 282, 520, '→', 14, muted, 400, 'middle');
+    });
+
+    text(28, 608, encryptShared ? 'Visible catalog → encrypted values in FileInfo and shared streams' : 'All C0 granularities move out of the shared streams into one encrypted block', 18, ink, 700);
+    box(28, 630, 548, 298, '#f8fafc');
+    box(624, 630, 548, 298, encryptShared ? '#f8fafc' : '#fff6e3', encryptShared ? border : '#ddcda8');
+    if (encryptShared) {
+      text(48, 662, 'Visible FileMetaData catalog', 20, ink, 700);
+      text(48, 695, 'crypto_metadata: algorithm + footer-key lookup metadata', 13, ink);
+      text(48, 724, 'data_layout, data_location, statistics: stream descriptors', 13, ink);
+      text(48, 753, 'encrypted_file_info: inline encrypted binary', 13, protectedColor, 600, 'start', true);
+      text(48, 782, 'file_info: absent', 13, muted, 400, 'start', true);
+      text(48, 819, 'Stream offsets, lengths, codecs and list sizes remain visible.', 13, muted);
+      text(48, 854, 'The footer key authenticates this entire catalog.', 14, ink, 600);
+      text(48, 898, hasKey ? 'Signature verified → stream descriptors can be trusted.' : 'No footer key → catalog visible, authenticity unverified.', 14, hasKey ? '#087d78' : amber, 700);
+      text(644, 662, hasKey ? 'After footer-key decryption' : 'Encrypted values stay unreadable', 20, hasKey ? protectedColor : amber, 700);
+      if (hasKey) {
+        text(644, 699, 'FileInfo: schema C0/C1/C2 · num_rows = 12', 16, ink, 600);
+        text(644, 733, 'Each selected shared stream decrypts independently:', 14, ink);
+        text(644, 763, 'column_chunk_index = [0, 3, 5, 7]', 14, protectedColor, 600, 'start', true);
+        text(644, 793, 'Also: region offsets, page indexes, dictionary references and statistics.', 13, muted);
+        text(644, 834, 'Fetch whole stream → authenticate → decode its pages.', 13, ink);
+        text(644, 862, 'Protection covers stream headers, dictionaries and bodies.', 13, muted);
+        text(644, 898, 'Footer key available → use decrypted metadata values.', 14, '#087d78', 700);
+      } else {
+        box(644, 682, 508, 164, protectedFill, '#d8cbea');
+        text(664, 720, 'encrypted_file_info + shared streams', 16, protectedColor, 700, 'start', true);
+        text(664, 757, 'Schema, row count and stream values require the key.', 13, protectedColor);
+        text(664, 793, 'The FileMetaData catalog itself is still visible.', 14, ink);
+        text(664, 826, 'Its offsets cannot be trusted until its signature is verified.', 13, muted);
+        text(644, 898, 'Footer key unavailable → metadata use is blocked.', 14, amber, 700);
+      }
+    } else {
+      text(48, 662, 'Shared statistics for C1 and C2', 20, ink, 700);
+      text(48, 695, 'C0 contributes zero ranges to every shared entry.', 14, ink);
+      text(48, 724, 'column_range_starts · G = original example', 13, ink, 600);
+      sharedEntries.forEach((entry, i) => text(48, 752 + i * 26, `shared[${i}] ← G${entry.g}: [${entry.indexes.join(', ')}]`, 14, protectedColor, 600, 'start', true));
+      text(48, 808, 'G1 becomes empty and is omitted from the shared list.', 13, muted);
+      text(48, 837, 'file_info and shared stream contents are plaintext.', 13, muted);
+      text(48, 867, 'Each shared stream has a 28-byte footer-key signature.', 13, ink);
+      text(48, 898, 'Verify the whole stream before decoding its metadata pages.', 12, muted);
+      text(644, 662, 'C0’s encrypted statistics block', 20, amber, 700);
+      text(644, 692, 'column_ordinal = 0 · key selector · offset + length', 13, ink, 400, 'start', true);
+      if (hasKey) {
+        text(644, 721, 'Decrypted payload: ColumnRowRangeStatistics', 15, ink, 600);
+        columnEntries.forEach((entry, i) => text(644, 749 + i * 23, `statistics[${i}] ← G${entry.g}: S=${entry.ranges.length}`, 13, ink, 400, 'start', true));
+        text(644, 826, 'All C0 granularities are encrypted together.', 13, muted);
+        text(644, 849, 'Local list positions; no column_range_starts.', 13, muted);
+        text(644, 872, 'Stream offsets are relative to page_streams.', 13, muted);
+      } else {
+        box(644, 712, 508, 164, protectedFill, '#d8cbea');
+        text(664, 751, 'Encrypted ColumnRowRangeStatistics', 17, protectedColor, 700);
+        text(664, 789, 'All granularities and internal streams require C0’s key.', 13, protectedColor);
+        text(664, 831, 'Missing key means unavailable statistics.', 14, muted);
+        text(664, 857, 'The column is not empty or all-null.', 13, muted);
+      }
+      text(644, 904, hasKey ? 'C0 key available → decrypt all its statistics.' : 'C0 key unavailable → C0 statistics remain encrypted.', 14, hasKey ? '#087d78' : amber, 700);
+    }
+
+    box(28, 950, 1144, 128, '#fff6e3', '#ddcda8');
+    text(48, 979, encryptShared ? 'The current design encrypts metadata values while keeping the catalog visible' : 'How the reader finds C0’s encrypted statistics', 18, amber, 700);
+    if (encryptShared) {
+      text(48, 1006, 'encrypted_file_info encrypts only the inline FileInfo. Shared streams are encrypted separately with the same footer key.', 14, ink);
+      text(48, 1032, 'FileMetaData retains visible stream locations, codecs, field presence, list sizes and any column-key descriptors.', 14, ink);
+      text(48, 1058, 'The complete serialized FileMetaData is signed. Its encrypted_file_info bytes are included in that signature.', 13, muted);
+    } else {
+      text(48, 1006, 'FileMetaData.encrypted_row_range_statistics.columns contains C0’s column ordinal, crypto_metadata, offset and length.', 13, ink);
+      text(48, 1032, 'offset is an absolute file position; length covers the entire encrypted block before FileMetaData.', 14, ink);
+      text(48, 1058, 'Shared streams use footer-key signatures. C0’s separate block uses AES-GCM with its selected column key.', 13, muted);
+    }
+    text(28, 1106, 'Source-data encryption is separate from these metadata rules. Missing keys mean unavailable metadata; authentication failures are errors.', 13, muted);
+    text(28, 1132, 'Source: ModularFooterV2.thrift and ENCRYPTED-ROW-RANGE-STATS.md · The PAR3 trailer is identical in both cases.', 12, muted);
+    const pmeHeight = 1156, pmeContent = out.join('');
+    const pmeDescription = encryptShared
+      ? `Current Modular Footer V2: encrypted_file_info and all shared streams use the footer key, which is ${hasKey ? 'available' : 'unavailable'}. FileMetaData stays visible and signed. Its crypto_metadata resolves the key. Authenticate the catalog before decrypting FileInfo or selected streams. The trailer stores the absolute FileMetaData offset followed by PAR3.`
+      : `Current Modular Footer V2: file_info and shared streams are plaintext and signed with the footer key, available in this example. C0 statistics occupy a separate encrypted block before FileMetaData; C0 key is ${hasKey ? 'available' : 'unavailable'}. All C0 granularities are absent from shared streams. The trailer stores the absolute FileMetaData offset followed by PAR3. Source-data encryption is separate.`;
+    $('pme-diagram').innerHTML = svg(pmeHeight, 'Current V2: footer-key encryption and selected column-statistics encryption', pmeDescription, pmeContent);
+    const pmeOffset = 1808 + statsHeight;
+    exportSvg = svg(pmeOffset + pmeHeight, 'Modular Footer V2: locations, dictionaries, statistics, and PME', regionDescription + ' ' + dictionaryDescription + ' ' + statsDescription + ' ' + pmeDescription,
+      regionContent + `<g transform="translate(0,560)">${selectionContent}</g><g transform="translate(0,1376)">${dictionaryContent}</g><g transform="translate(0,1808)">${statsContent}</g><g transform="translate(0,${pmeOffset})">${pmeContent}</g>`);
+    $('summary').textContent = description + ' ' + dictionaryDescription + ' ' + statsDescription + ' ' + pmeDescription;
+  }
+  options('column', [[0, '0 · C0'], [1, '1 · C1'], [2, '2 · C2']], 0);
+  $('column').addEventListener('change', () => setColumn(+$('column').value));
+  $('chunk').addEventListener('change', () => setChunk());
+  $('page').addEventListener('change', render);
+  $('offsets').addEventListener('change', render);
+  $('export').addEventListener('click', () => {
+    const url = URL.createObjectURL(new Blob([exportSvg], {type: 'image/svg+xml'}));
+    const a = document.createElement('a');
+    a.href = url; a.download = 'modular-footer-data-location.svg'; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  options('stats-column', [[0, 'C0'], [1, 'C1'], [2, 'C2']], 0);
+  options('stats-granularity', rowRangeStatistics.map((entry, g) => [g, `[${g}] ${entry.label}`]), 0);
+  setStatsRange(1);
+  options('protection-mode', [['footer-key', 'Encrypt FileInfo + shared streams'], ['column-key', 'Encrypt selected column statistics']], 'footer-key');
+  for (const id of ['stats-column', 'stats-granularity']) $(id).addEventListener('change', () => { setStatsRange(); render(); });
+  for (const id of ['stats-range', 'protection-mode', 'pme-key']) $(id).addEventListener('change', render);
+  setColumn(0, 2, 1);
+</script>
+</html>
