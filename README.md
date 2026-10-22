@@ -1,5 +1,7 @@
 # parquet-footer-bench
 
+Start with the [Modular Footer V2 playground guide](footer-pages/PLAYGROUND.md) for the current definition, four cumulative comparison levels, tested datasets, Raincloud Java-writer setup, and size/decoding protocol. It distinguishes the public baseline tools from the optimized V2 experiment's additional Runtime codec and build-artifact dependencies.
+
 A small, dependency-free playground for **experimenting with Parquet footer layouts** and
 measuring them — not estimating them. A Parquet reader, before it can fetch column data,
 needs the *placement* of every column chunk (where it starts, how big it is) and often has
@@ -8,8 +10,7 @@ Thrift `FileMetaData` footer. This repo makes the trade-offs of encoding it diff
 concrete: every number comes from a real serialize → parse → resolve round-trip, and a
 fidelity cross-check proves each layout resolves to the identical answer before any timing.
 
-No third-party dependencies (the Thrift Compact codec is vendored). Build everything from
-the repo root with any C++17 compiler:
+The baseline CMake targets have no third-party dependencies (the Thrift Compact codec is vendored). Build these targets from the repo root with any C++17 compiler:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
