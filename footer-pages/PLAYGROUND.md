@@ -33,7 +33,7 @@ Modular Footer V2 replaces nested metadata records with flattened, typed arrays 
 | [Modular](../modular-footer/ModularFooter.thrift) | Schema/placement/statistics/index modules, packed arrays and shared min/max prefixes, choosing the smaller valid dense-bitmap or sparse-present-index representation per array. |
 | Modular Footer V2 | Version-21 typed page streams, with encodings/page capacities selected by measured stored size. Report uncompressed and selective-Zstd variants separately. |
 
-The authoritative definition is [ModularFooterV2.thrift](ModularFooterV2.thrift), version **21**.
+The current definition is [ModularFooterV2.thrift](ModularFooterV2.thrift), version **23**: tagged row ranges retain V21's region map and relative page offsets. Historical measurements in this guide use V21 unless stated otherwise. The [V29 shared structure draft](SharedStructureFooter.thrift) stores list structure once per group and allows different chunk counts per column; its encoder, decoder and measurements are pending.
 
 V2 stores typed metadata arrays in ordinary Parquet page streams. Each stream contains an optional `DICTIONARY_PAGE`, followed by `DATA_PAGE_V2` pages. There is **no specialized footer page header**. A field's ID defines its physical type and nullability, so we do not serialize a separate `SchemaElement` tree for the metadata arrays. The user's source-data schema is still stored once in `FileInfo`.
 

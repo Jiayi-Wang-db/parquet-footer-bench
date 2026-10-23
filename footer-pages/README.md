@@ -6,7 +6,8 @@ Modular Footer V2 stores metadata arrays as typed Parquet page streams, with a s
 |---|---|
 | [Playground guide](PLAYGROUND.md) | V2 design → Raincloud setup → tested datasets → four size levels → codec implementations → decoding tests → layout/encoding experiments → result recording. |
 | [Experiment results](EXPERIMENT-RESULTS.md) | Consolidated size/decoding results, design experiments, source-record lookup, and pending measurements. |
-| [Thrift definition](ModularFooterV2.thrift) | Version-21 layout, page streams, statistics, and encryption contract. |
+| [Thrift definition](ModularFooterV2.thrift) | V23 tagged row ranges; retains the region map and relative page offsets. |
+| [Shared structure schema draft](SharedStructureFooter.thrift) | V29 stores list structure once per group and allows different chunk counts per column. Encoder, decoder and measurements are pending. |
 | [Layout visualization](data-location-visualization.html) | Interactive HTML; download and open in a browser. |
 
 The guide includes runnable source-generation and baseline benchmark commands. The optimized V2 benchmark harness and Runtime codecs are separate dependencies and are not packaged in this directory.

@@ -140,16 +140,24 @@ struct PageMetadata {
   1: required StreamLocation page_first_rows;
 }
 
+/** How one statistics set obtains its row ranges. */
+enum RowRangeKind {
+  COLUMN_CHUNK = 0,
+  PAGE = 1,
+  ARBITRARY = 2
+}
+
 /** S ranges for one granularity; the containing struct determines column ownership.
- * Boundaries need not align with pages, column chunks or row groups.
+ * ARBITRARY boundaries need not align with pages, column chunks or row groups.
  * Missing statistics mean unknown, including whether the data is all null.
  */
 struct RangeStatistics {
-  /** INT64, required, S entries, storing absolute first-row indexes.
+  /** INT64, non-null, S entries, storing absolute first-row indexes.
+    * Present exactly when range_kind is ARBITRARY.
     * For a column with ranges, starts begin at 0 and strictly increase below FileInfo.num_rows.
     * A range ends at the next start for the same column, or FileInfo.num_rows.
     */
-  1: required StreamLocation range_start_rows;
+  1: optional StreamLocation range_start_rows;
 
   /** BOOLEAN, nullable, S entries; true means the range contains at least one null.
     * False means no nulls; null or an omitted stream means unknown.
@@ -186,6 +194,32 @@ struct RangeStatistics {
     * null means unknown. An unavailable bound has a null exactness entry.
     */
   12: optional StreamLocation min_max_is_exact;
+
+  /** One tag for this entire statistics set. Writers emit it explicitly.
+    * Omission means ARBITRARY, including when reading a V21 footer.
+    * Unknown tags are unsupported and must not be interpreted as another kind.
+    *
+    * COLUMN_CHUNK: one range per chunk of each participating column, in chunk order.
+    * If RowGroupMetadata is present, each participating column must have exactly
+    * G chunks, with chunk g's region in row group g's region interval. Starts are
+    * prefix sums of row_group_num_rows. Otherwise DataLayout.page_index and
+    * PageMetadata.page_first_rows must be present: each chunk has at least one
+    * page and starts at page_first_rows[page_index[cc]]. Use ARBITRARY when these
+    * conditions do not hold. Never derive row counts from num_values.
+    *
+    * PAGE: one range per data page of each participating column, in page order.
+    * Requires DataLayout.page_index and PageMetadata.page_first_rows; starts are
+    * the corresponding page_first_rows entries. Every participating chunk has
+    * at least one page. Both implicit kinds require row-aligned, nonempty ranges
+    * partitioning [0, FileInfo.num_rows): starts begin at zero and strictly
+    * increase. The next range start, or FileInfo.num_rows, is the end.
+    *
+    * Keep positions for unavailable individual statistics, using unknown values.
+    * An absent column still contributes zero ranges via column_range_starts.
+    * Referenced layout/row streams must be present and authenticated/decrypted
+    * under their own protection policy before these statistics can be used.
+    */
+  13: optional RowRangeKind range_kind = RowRangeKind.ARBITRARY;
 }
 
 /** One shared granularity across C columns, with S ranges in total.
@@ -218,10 +252,12 @@ struct ColumnIndexedRangeStatistics {
 /** Plaintext of one encrypted column-statistics module; Compact-Thrift serialized.
  * Every range belongs to the column identified by EncryptedColumnRowRangeStatistics.column_ordinal.
  * Each list entry has its own S ranges partitioning [0, FileInfo.num_rows).
- * There is no column_range_starts; range_start_rows uses absolute file row indexes.
+ * There is no column_range_starts. range_kind uses this column's shared layout
+ * and row metadata; ARBITRARY instead stores absolute range_start_rows locally.
  * Only the column's physical-type bound stream may be present, with 2S entries.
  * Every StreamLocation.offset below is relative to page_streams, not the footer or file.
- * All referenced streams, dictionaries and page headers are contained in page_streams.
+ * All streams explicitly located by this payload are contained in page_streams.
+ * Implicit row ranges additionally depend on the authenticated shared metadata.
  */
 struct ColumnRowRangeStatistics {
   /** Independent granularities; nonempty, with the same semantics as the root list.
@@ -322,7 +358,7 @@ struct FileInfo {
  * protection policy; stripping crypto metadata must not downgrade an encrypted file.
  */
 struct FileMetaData {
-  1: required i32 version; // 21.
+  1: required i32 version; // 23. V21 readers must reject this version.
 
   /** Exactly one of file_info and encrypted_file_info must be present. */
   2: optional FileInfo file_info;
@@ -334,7 +370,8 @@ struct FileMetaData {
   6: required ColumnChunkMetadata column_chunk_metadata;
   7: optional PageMetadata page_metadata;
   /** Independent granularities, usually row-group and page-level statistics.
-    * Each entry has its own indexes, row boundaries and S; there is no two-entry limit.
+    * Each entry has its own indexes, range_kind and S; only ARBITRARY stores row
+    * boundaries. There is no two-entry limit.
     * Writers should order coarse to fine; boundaries need not nest across entries.
     * Readers use row intervals, not list positions, to match ranges across entries.
     * Counts from overlapping granularities must not be added together.
