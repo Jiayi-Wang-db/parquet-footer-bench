@@ -1,8 +1,9 @@
 /** Standalone draft: explicit indexes for the column -> chunk -> page hierarchy.
  * All proposal types are local; parquet.thrift supplies standard Parquet types.
- * This is a schema-only proposal, not the wire layout measured as V23 or V30.
- * Tagged-statistics index reuse below has not been implemented or benchmarked.
- * Allocate a distinct wire version before encoding this layout.
+ * Plaintext hierarchy and tagged-statistics index reuse are prototyped as
+ * repository-local experiment V31; see REFINED-HIERARCHY.md for measurements.
+ * This differs from V23/V30. Encryption and other unmeasured extensions remain
+ * schema-only. V31 is not an allocated public format identifier.
  *
  * C = physical columns; K_c = chunks in column c; K = sum(K_c).
  * P_k = data pages in chunk k; P = sum(P_k); R = regions; G = row groups.
@@ -446,7 +447,7 @@ struct FileInfo {
  * expected protection policy; stripping crypto metadata must not downgrade a file.
  */
 struct ExplicitIndexFooter {
-  1: required i32 version; // Draft: allocate a distinct wire version before use.
+  1: required i32 version; // Experiment V31; no public wire-version allocation.
 
   /** Exactly one of file_info and encrypted_file_info must be present. */
   2: optional FileInfo file_info;
