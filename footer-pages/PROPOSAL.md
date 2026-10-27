@@ -16,7 +16,7 @@ The current modular footer separates placement, statistics, page indexes, and de
 | **Statistics values** | Min/max bounds use byte-array prefixes and suffixes with dedicated common-prefix handling. | Store paired min/max values in streams of their physical type. | Apply ordinary typed encodings to bounds and avoid a separate min/max prefix representation. |
 | **Metadata directory** | The root locates modules; statistics and page-index modules locate further descriptors containing inline arrays. | Put shared stream locations directly in the footer directory. | Reduce descriptor lookups and let readers fetch individual fields. This moves more descriptors into the initial directory. |
 
-Direct chunk offsets are retained from the current modular footer. The region map discussed in the alternatives below belonged to an earlier local experiment; removing it is not a change from the current modular footer. The source schema is still stored once, and placement remains readable without statistics.
+Direct chunk offsets are retained from the current modular footer. The source schema is still stored once, and placement remains readable without statistics.
 
 The main tradeoff is size versus access granularity. Explicit indexes locate logical positions without reconstructing list boundaries, but encoded streams do not guarantee the current modular footer's direct positional access to packed values. Shared streams may also require reading metadata for unselected columns. [Optional column sets](#optional-future-extension-column-sets) could limit that work for exceptionally wide files; the base proposal requires no column-set wrapper or membership array.
 
@@ -137,19 +137,6 @@ dictionary = none if d is null else (dictionary_offsets[d], dictionary_lengths[d
 Here `boundary(index, n)` accepts `0 <= n <= length(index)` and never reads `index[-1]` for `n = 0`. For valid column `c`, chunk statistics occupy `[a,b)` and page statistics occupy `[boundary(page_index,a), boundary(page_index,b))`, including empty columns. The same chunk/page positions address codecs, row positions, and tagged statistics. No hierarchy levels need to be scanned or reconstructed.
 
 These formulas identify logical positions after the necessary index values have been decoded. The format does not store a byte-offset directory for every metadata page. A reader can scan page headers, accumulate their value counts, and cache a directory for locating an encoded range. The selected encoding may still require decoding preceding values within a block or decompressing a page. Protected streams must also be authenticated according to their protection unit before use. Explicit indexes therefore remove hierarchy reconstruction, but do not promise constant-time file access.
-
-## Alternatives considered
-
-| Alternative | Benefit | Reason for the proposed choice |
-|---|---|---|
-| Region map (earlier local experiment) | Infers lengths from shared file-order boundaries and is smaller in the measured corpus. | Retain the current modular footer's direct data addressing. Accept the size increase over the region-map experiment; keep dictionary indirection to support reuse. |
-| Dictionary offset/length repeated per chunk | Avoids dictionary ID lookup. | A separate dictionary table stores each dictionary extent once and directly expresses reuse within a column. |
-| Nested RL/DL in every chunk/page leaf | Expresses column → chunk → page directly. | Repeats hierarchy structure; selective reads must recover boundaries from levels. Shared prefixes expose those boundaries directly. |
-| One RL/DL carrier, other leaves flattened | Avoids repeating hierarchy levels. | Still requires boundary reconstruction and a dependency on the carrier. Two explicit prefixes make that shared dependency easier to use. |
-| Per-column/per-chunk counts | Describes each list's length. | Locating a later list requires a prefix sum. Store the prefixes and derive counts by subtraction. |
-| Omit the first page offset | Saves a redundant zero, including the sole offset in a single-page chunk. | Offset positions would no longer match page-row and statistics positions. Keep one offset per page when the stream exists. |
-
-The recommendation is shared explicit prefixes: the reader's addressing rules are simple, all sibling fields reuse them, and selective access avoids reconstructing list structure. Nested lists remain a useful way to explain the logical model.
 
 ## Framing, protection, and compatibility
 
