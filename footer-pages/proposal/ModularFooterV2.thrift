@@ -357,7 +357,7 @@ struct RangeStatistics {
  * ARBITRARY uses its own per-column index and permits zero ranges for a column.
  * A column's usable ranges partition [0, FileInfo.num_rows).
  */
-struct ColumnRangeStatistics {
+struct SharedRangeStatistics {
   /** list<i64>; number of values = C+1.
    * Nullability: list and values are non-null. No repetition/definition levels.
    * Present exactly when statistics.range_kind is ARBITRARY.
@@ -517,7 +517,7 @@ struct ModularFooterV2 {
    * Counts from overlapping granularities must not be added together.
    * Omit sets with no available statistics; omit the list when none exist.
    */
-  8: optional list<ColumnRangeStatistics> row_range_statistics;
+  8: optional list<SharedRangeStatistics> row_range_statistics;
 
   /** list<binary>; number of values = M.
    * Nullability: list and values are non-null. Physical type: BYTE_ARRAY.

@@ -60,7 +60,7 @@ struct ColumnSetMetadata {
    * require fetching statistics payloads. Decoding one leaf's values does
    * not require sibling leaves; interpreting ranges requires shared metadata.
    */
-  8: optional list<ModularFooterV2.ColumnRangeStatistics> row_range_statistics;
+  8: optional list<ModularFooterV2.SharedRangeStatistics> row_range_statistics;
 }
 
 /** Tail: [independently located streams][Compact-Thrift root]
