@@ -66,6 +66,8 @@
 include "../../modular-footer/parquet.thrift"
 namespace cpp parquet.modularv2
 
+// Shared metadata structures.
+
 /** Standard PageHeader + body pairs: [optional DICTIONARY_PAGE][DATA_PAGE_V2 ...].
  * Field IDs imply physical types and nullability; no separate stream schema.
  * Shared streams inherit root protection: plaintext, independently signed,
@@ -388,77 +390,6 @@ struct SharedRangeStatistics {
   3: optional StreamLocation boundary_orders;
 }
 
-/** Plaintext of one encrypted column-statistics module; Compact-Thrift serialized.
- * Every range belongs to EncryptedColumnRowRangeStatistics.column_ordinal.
- * Each list entry has its own S ranges partitioning [0, FileInfo.num_rows).
- * Here COLUMN_CHUNK has S=K_c; PAGE has S equal to this column's page count.
- * There is no column_range_starts. Positional tags use this column's shared
- * structure and row metadata; ARBITRARY stores range_start_rows locally.
- * Only the column's physical-type bound stream may be present, with 2S entries.
- * All StreamLocation offsets here are relative to page_streams, which contains
- * every explicitly located stream. Positional tags additionally depend on
- * authenticated shared metadata, including ColumnChunkMetadata.first_row_index
- * for COLUMN_CHUNK.
- */
-struct ColumnRowRangeStatistics {
-  /** Independent granularities; nonempty, with the same semantics as the root list.
-   * List positions are local to this payload, not shared with other columns or
-   * the root. All granularities are encrypted together in one column module.
-   */
-  1: required list<RangeStatistics> statistics;
-
-  /** Concatenated ordinary metadata page streams, encoded and compressed before
-   * encryption. Each permits an optional DICTIONARY_PAGE followed by DATA_PAGE_V2
-   * pages. StreamLocation supplies offset, length and compression codec.
-   */
-  2: required binary page_streams;
-
-  /** One value per statistics list entry, describing bound ordering within that
-   * granularity. Omission means all UNORDERED; unavailable orders are UNORDERED.
-   */
-  3: optional list<parquet.BoundaryOrder> boundary_orders;
-}
-
-/** One independently encrypted module for one physical column across the file. */
-struct EncryptedColumnRowRangeStatistics {
-  /** Physical leaf-column ordinal in FileInfo.schema; 0 <= column_ordinal < C. */
-  1: required i32 column_ordinal;
-
-  /** Exactly one PME key selector; no raw key material.
-   * ENCRYPTION_WITH_COLUMN_KEY: path_in_schema must match column_ordinal;
-   * resolve that column's DEK using its key metadata.
-   * ENCRYPTION_WITH_FOOTER_KEY: use the footer DEK from root crypto_metadata.
-   * The selected key applies across all granularities and row groups for this column.
-   */
-  2: required parquet.ColumnCryptoMetaData crypto_metadata;
-
-  /** Absolute file offset of the encrypted module's length prefix.
-   * The block precedes the root directory and is disjoint from shared streams.
-   */
-  3: required i64 offset;
-
-  /** Total bytes: 4-byte LE length + 12-byte nonce + ciphertext + 16-byte GCM tag.
-   * Length prefix excludes itself. The plaintext is ColumnRowRangeStatistics.
-   * PME encrypts this metadata with AES-GCM under both AES_GCM_V1 and AES_GCM_CTR_V1.
-   */
-  4: required i64 length;
-}
-
-/** E independently encrypted column-statistics modules; omit when E is zero.
- * In shared ARBITRARY sets, each listed column has zero ranges.
- * In shared COLUMN_CHUNK/PAGE sets, its existing positions contain only unknown
- * statistics; an encrypted module must not cause shared positions to be removed.
- * With encrypted shared streams, footer-key statistics may stay in shared arrays;
- * statistics requiring a separate column key must use an independent block.
- * With signed shared streams, protected statistics require an independent block.
- * Missing key means unavailable statistics, not all-null or an empty data column.
- * Failed authentication or a malformed decrypted payload is an error.
- */
-struct EncryptedRowRangeStatistics {
-  /** E entries, sorted by column_ordinal; no duplicate columns or overlapping blocks. */
-  1: required list<EncryptedColumnRowRangeStatistics> columns;
-}
-
 /** Small inline metadata; stored once, either plaintext or encrypted with the footer key. */
 struct FileInfo {
   1: required i32 num_columns; // Physical columns.
@@ -548,4 +479,77 @@ struct ModularFooterV2 {
 
   /** Independently encrypted statistics; disjoint from shared row_range_statistics. */
   13: optional EncryptedRowRangeStatistics encrypted_row_range_statistics;
+}
+
+// Parquet Modular Encryption (PME) structures.
+
+/** Plaintext of one encrypted column-statistics module; Compact-Thrift serialized.
+ * Every range belongs to EncryptedColumnRowRangeStatistics.column_ordinal.
+ * Each list entry has its own S ranges partitioning [0, FileInfo.num_rows).
+ * Here COLUMN_CHUNK has S=K_c; PAGE has S equal to this column's page count.
+ * There is no column_range_starts. Positional tags use this column's shared
+ * structure and row metadata; ARBITRARY stores range_start_rows locally.
+ * Only the column's physical-type bound stream may be present, with 2S entries.
+ * All StreamLocation offsets here are relative to page_streams, which contains
+ * every explicitly located stream. Positional tags additionally depend on
+ * authenticated shared metadata, including ColumnChunkMetadata.first_row_index
+ * for COLUMN_CHUNK.
+ */
+struct ColumnRowRangeStatistics {
+  /** Independent granularities; nonempty, with the same semantics as the root list.
+   * List positions are local to this payload, not shared with other columns or
+   * the root. All granularities are encrypted together in one column module.
+   */
+  1: required list<RangeStatistics> statistics;
+
+  /** Concatenated ordinary metadata page streams, encoded and compressed before
+   * encryption. Each permits an optional DICTIONARY_PAGE followed by DATA_PAGE_V2
+   * pages. StreamLocation supplies offset, length and compression codec.
+   */
+  2: required binary page_streams;
+
+  /** One value per statistics list entry, describing bound ordering within that
+   * granularity. Omission means all UNORDERED; unavailable orders are UNORDERED.
+   */
+  3: optional list<parquet.BoundaryOrder> boundary_orders;
+}
+
+/** One independently encrypted module for one physical column across the file. */
+struct EncryptedColumnRowRangeStatistics {
+  /** Physical leaf-column ordinal in FileInfo.schema; 0 <= column_ordinal < C. */
+  1: required i32 column_ordinal;
+
+  /** Exactly one PME key selector; no raw key material.
+   * ENCRYPTION_WITH_COLUMN_KEY: path_in_schema must match column_ordinal;
+   * resolve that column's DEK using its key metadata.
+   * ENCRYPTION_WITH_FOOTER_KEY: use the footer DEK from root crypto_metadata.
+   * The selected key applies across all granularities and row groups for this column.
+   */
+  2: required parquet.ColumnCryptoMetaData crypto_metadata;
+
+  /** Absolute file offset of the encrypted module's length prefix.
+   * The block precedes the root directory and is disjoint from shared streams.
+   */
+  3: required i64 offset;
+
+  /** Total bytes: 4-byte LE length + 12-byte nonce + ciphertext + 16-byte GCM tag.
+   * Length prefix excludes itself. The plaintext is ColumnRowRangeStatistics.
+   * PME encrypts this metadata with AES-GCM under both AES_GCM_V1 and AES_GCM_CTR_V1.
+   */
+  4: required i64 length;
+}
+
+/** E independently encrypted column-statistics modules; omit when E is zero.
+ * In shared ARBITRARY sets, each listed column has zero ranges.
+ * In shared COLUMN_CHUNK/PAGE sets, its existing positions contain only unknown
+ * statistics; an encrypted module must not cause shared positions to be removed.
+ * With encrypted shared streams, footer-key statistics may stay in shared arrays;
+ * statistics requiring a separate column key must use an independent block.
+ * With signed shared streams, protected statistics require an independent block.
+ * Missing key means unavailable statistics, not all-null or an empty data column.
+ * Failed authentication or a malformed decrypted payload is an error.
+ */
+struct EncryptedRowRangeStatistics {
+  /** E entries, sorted by column_ordinal; no duplicate columns or overlapping blocks. */
+  1: required list<EncryptedColumnRowRangeStatistics> columns;
 }
