@@ -5,7 +5,10 @@
  * M = key/value pairs. K_c may vary, including zero, independently of G.
  * Chunk membership alone does not determine row coverage.
  *
- * list<T> comments describe flat Parquet page streams, not inline Thrift lists.
+ * For StreamLocation fields, list<T> in comments describes the decoded sequence
+ * of T values, stored in Parquet pages. The Thrift field contains only the
+ * stream's offset, length and codec. Fields declared as list<T> in Thrift
+ * store inline Thrift lists.
  * i32/i64/bool/binary map to INT32/INT64/BOOLEAN/BYTE_ARRAY;
  * float/double map to FLOAT/DOUBLE. Field IDs define types; no stream schema
  * is serialized. FileInfo.schema describes the source data.
