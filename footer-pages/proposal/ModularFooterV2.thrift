@@ -65,7 +65,7 @@ struct DataLayout {
   2: optional StreamLocation page_index;
 }
 
-/** Dictionary IDs address table positions; no region or column mapping is stored. */
+/** Dictionary IDs address table positions. */
 struct DictionaryMetadata {
   /** INT64; number of values = D; nullability: non-null. D fits signed i32.
    * Absolute dictionary-page offsets, including headers. Store each referenced
