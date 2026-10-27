@@ -1,20 +1,24 @@
-# Proposal: direct locations and typed metadata streams with shared indexes
+# Proposal: extending the modular footer with flexible layouts and typed metadata streams
 
-Status: design draft for discussion. The [complete Thrift definition](ExplicitIndexFooter.thrift) accompanies this proposal; all proposal-specific types are defined in that file. It imports only standard Parquet types from `parquet.thrift`.
+Status: design draft for discussion, based on the [current modular footer](../modular-footer/ModularFooter.thrift). The [complete proposed Thrift definition](ExplicitIndexFooter.thrift) accompanies this document and imports only standard Parquet types from `parquet.thrift`.
 
-## Summary
+## Changes from the current modular footer, and why
 
-This proposal extends the modular footer in five areas:
+The current modular footer separates placement, statistics, page indexes, and descriptive metadata into independently readable modules. It already uses typed arrays, direct chunk offsets, and positional indexing. This proposal keeps those foundations and changes the following:
 
-- **More flexible data layouts.** Columns can have different numbers of chunks, including zero, so dense and sparse columns can be laid out independently. Row groups are optional; chunk placement does not require one chunk per column per row group.
-- **Direct chunk locations with reusable dictionaries.** Each chunk stores its absolute data offset and length. A separate table stores dictionary offsets and lengths, referenced by nullable chunk dictionary IDs. Chunks in the same column can reuse a dictionary. Data access needs no region-map lookup.
-- **Statistics over different row ranges.** Statistics can describe column chunks, pages, or arbitrary row ranges. Multiple granularities can coexist, and their boundaries need not nest. Tags let chunk/page statistics reuse existing row positions; only arbitrary ranges store their own boundaries.
-- **Shared indexes across metadata fields.** One column-to-chunk prefix index groups all chunk fields, and one chunk-to-page prefix index groups all page fields. Aligned statistics reuse these indexes, with unknown slots preserving positions when statistics are missing.
-- **Typed metadata streams using Parquet encodings.** A small Thrift directory points directly to independently encoded arrays. Existing page encodings and compression can be used for metadata, while the source schema is stored once.
+| Area | Current modular footer | Proposed change | Why |
+|---|---|---|---|
+| **Column/chunk layout** | Chunk positions use `column * num_row_groups + row_group`, with one chunk per column per row group. | Use one shared `column_chunk_index`; row-group metadata becomes optional. | Allow each column to have its own chunk count, including zero, so dense and sparse columns can be organized independently. |
+| **Page metadata** | Each chunk has separate offset-index and column-index descriptors, located through `PageIndexModule.chunk_offsets`. Page locations store offsets and sizes. | Flatten page fields under one shared `page_index`. Store chunk-relative page offsets, derive page lengths from the next offset or chunk end, and use file-relative row positions. | Reuse the same page positions across locations, row positions, and statistics; remove per-chunk descriptors and support layouts without row groups. |
+| **Statistics ranges** | Separate `ColumnStatistics` and `ColumnIndexChunk` structures describe row-group and page statistics. | Use one statistics structure tagged `COLUMN_CHUNK`, `PAGE`, or `ARBITRARY`; allow multiple range sets. | Support statistics whose row ranges differ from physical chunk/page boundaries. Chunk/page tags reuse existing indexes and row starts instead of storing them again. |
+| **Dictionary locations** | `first_dictionary_pages` indexes a flattened list of dictionary offsets; placement also stores per-chunk total sizes. | Keep direct data offsets, give data and dictionaries separate lengths, and reference a distinct dictionary table by nullable chunk ID. | Store a dictionary extent once for reuse within a column, and locate data and dictionary bytes independently. This draft supports at most one dictionary per chunk. |
+| **Array encoding** | Inline `EncodedArray` values use seekable `BITSET` or `PRESENT_INDEX` encodings, without compression or cross-value dependence. | Store arrays as typed Parquet metadata page streams, with existing encodings and optional compression. | Reuse Parquet encoding implementations and exploit repeated or regular metadata values to reduce size. The tradeoff is decoding a block or page to reach some values. |
+| **Statistics values** | Min/max bounds use byte-array prefixes and suffixes with dedicated common-prefix handling. | Store paired min/max values in streams of their physical type. | Apply ordinary typed encodings to bounds and avoid a separate min/max prefix representation. |
+| **Metadata directory** | The root locates modules; statistics and page-index modules locate further descriptors containing inline arrays. | Put shared stream locations directly in the footer directory. | Reduce descriptor lookups and let readers fetch individual fields. This moves more descriptors into the initial directory. |
 
-The base proposal uses shared indexes and streams across the file, with no column-set wrapper or membership array. [Optional column sets](#optional-future-extension-column-sets) could extend this design for exceptionally wide files; their representation is deferred.
+Direct chunk offsets are retained from the current modular footer. The region map discussed in the alternatives below belonged to an earlier local experiment; removing it is not a change from the current modular footer. The source schema is still stored once, and placement remains readable without statistics.
 
-The design retains separate access to placement, statistics, and descriptive metadata. Accessing an encoded value can require decoding its containing block or page; the format does not guarantee the original modular proposal's direct positional access to packed values.
+The main tradeoff is size versus access granularity. Explicit indexes locate logical positions without reconstructing list boundaries, but encoded streams do not guarantee the current modular footer's direct positional access to packed values. Shared streams may also require reading metadata for unselected columns. [Optional column sets](#optional-future-extension-column-sets) could limit that work for exceptionally wide files; the base proposal requires no column-set wrapper or membership array.
 
 ## Representation
 
@@ -136,7 +140,7 @@ These formulas identify logical positions after the necessary index values have 
 
 | Alternative | Benefit | Reason for the proposed choice |
 |---|---|---|
-| Region map | Infers lengths from shared file-order boundaries and is smaller in the measured corpus. | Direct chunk offsets/lengths remove the data-region lookup. Accept the measured size increase; keep dictionary indirection to support reuse. |
+| Region map (earlier local experiment) | Infers lengths from shared file-order boundaries and is smaller in the measured corpus. | Retain the current modular footer's direct data addressing. Accept the size increase over the region-map experiment; keep dictionary indirection to support reuse. |
 | Dictionary offset/length repeated per chunk | Avoids dictionary ID lookup. | A separate dictionary table stores each dictionary extent once and directly expresses reuse within a column. |
 | Nested RL/DL in every chunk/page leaf | Expresses column → chunk → page directly. | Repeats hierarchy structure; selective reads must recover boundaries from levels. Shared prefixes expose those boundaries directly. |
 | One RL/DL carrier, other leaves flattened | Avoids repeating hierarchy levels. | Still requires boundary reconstruction and a dependency on the carrier. Two explicit prefixes make that shared dependency easier to use. |
@@ -153,7 +157,9 @@ Protected modes authenticate the visible directory and independently protect sha
 
 Readers validate index lengths, monotonicity, terminal counts, data/dictionary extents, dictionary ID bounds and ownership, and the positional invariants before use. Dictionary references must belong to one physical column and use compatible decoding. Check offset/length sums without integer overflow. Unsupported required format versions or encodings cannot be guessed. Unknown optional fields can be skipped; an unknown statistics tag makes that set unsupported, not equivalent to another tag.
 
-The current statistics schema preserves pruning information through null/NaN presence and all-null flags, but does not preserve exact null/NaN counts, histograms, or column-order descriptors. These are compatibility decisions to resolve before adoption; the draft is not a lossless replacement for every PAR1 metadata field. The public encoding profile, format version, and protection identifiers also require agreement. Repository-local experimental encodings and version numbers are not public allocations.
+Compared with the current modular footer, the proposed statistics schema uses null/NaN presence and all-null flags instead of exact null/NaN counts, and does not yet carry `SchemaModule.column_orders` or an equivalent of the optional `SchemaIndexModule`. Its single nullable dictionary ID also narrows the current placement schema's ability to list multiple dictionaries per chunk. These are compatibility decisions to resolve before adoption. The draft is not a lossless replacement for every current modular or PAR1 metadata field; histograms are also outside its present scope.
+
+The public encoding profile, format version, and protection identifiers require agreement. Repository-local experimental encodings and version numbers are not public allocations.
 
 ## Optional future extension: column sets
 
@@ -167,4 +173,4 @@ Smaller sets reduce metadata fetched for narrow projections but add descriptors 
 
 ## Supporting material
 
-The [full IDL](ExplicitIndexFooter.thrift) defines every field's type, value count, nullability, and dependencies. Local historical measurements compare [V31 explicit indexes](legacy/ExplicitIndexFooterV31.thrift) and [V32 nested layouts](ImplicitLevelsFooter.thrift), both using region maps, alongside the [original modular footer](../modular-footer/ModularFooter.thrift). They support the selective-read recommendation for explicit indexes; their timings do not measure this direct-offset revision. The [direct-offset size results](DIRECT-OFFSETS.md) compare the chosen representation with both region-map and original modular cores. Production encryption, direct-offset decoding-speed measurements, and a public interoperability test suite remain outside the validated scope.
+The [full IDL](ExplicitIndexFooter.thrift) defines every field's type, value count, nullability, and dependencies. Local historical measurements compare [V31 explicit indexes](legacy/ExplicitIndexFooterV31.thrift) and [V32 nested layouts](ImplicitLevelsFooter.thrift), both using region maps, alongside the [current modular footer baseline](../modular-footer/ModularFooter.thrift). They support the selective-read recommendation for explicit indexes over nested levels; their timings do not measure this direct-offset revision. The [direct-offset size results](DIRECT-OFFSETS.md) compare the chosen representation with both region-map and modular cores. Production encryption, direct-offset decoding-speed measurements, and a public interoperability test suite remain outside the validated scope.
