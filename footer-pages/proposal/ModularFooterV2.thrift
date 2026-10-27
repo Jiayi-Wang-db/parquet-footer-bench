@@ -1,11 +1,10 @@
-/** Standalone draft: explicit indexes for the column -> chunk -> page hierarchy.
+/** Modular footer draft: explicit indexes for the column -> chunk -> page hierarchy.
  * All proposal types are local; parquet.thrift supplies standard Parquet types.
- * V38 stores only cumulative ends in column_chunk_index and page_index; their
- * initial zero is implicit. It retains V35's direct chunk offsets/lengths,
- * dictionary table and tagged statistics. V35 stored a leading zero in both
- * indexes; use ../legacy/ExplicitIndexFooterV35.thrift for its measured artifacts.
- * These versions are not wire-compatible. Encryption remains schema-only.
- * V38 is a repository-local experiment, not a public format allocation.
+ * column_chunk_index and page_index store cumulative ends; their initial zero
+ * is implicit. Chunk extents, dictionary extents and page metadata have their
+ * own structs. Moving page locations into PageMetadata changes the directory
+ * layout from the measured V38 experiment. A new wire version is required;
+ * its allocation is pending. Encryption remains schema-only.
  *
  * C = physical columns; K_c = chunks in column c; K = sum(K_c).
  * P_k = data pages in chunk k; P = sum(P_k); D = dictionaries; G = row groups.
@@ -65,7 +64,7 @@
  * An unavailable index is not an empty hierarchy.
  */
 include "../../modular-footer/parquet.thrift"
-namespace cpp parquet.explicitindex
+namespace cpp parquet.modularv2
 
 /** Standard PageHeader + body pairs: [optional DICTIONARY_PAGE][DATA_PAGE_V2 ...].
  * Field IDs imply physical types and nullability; no separate stream schema.
@@ -108,18 +107,18 @@ struct DataLayout {
    * Nullability: list and values are non-null.
    * Non-decreasing cumulative ends; last value is P. Empty when K=0, then P=0.
    * Chunk k owns pages [boundary(page_index,k), page_index[k]).
-   * Required when relative_page_offsets or page_metadata is present.
-   * PAGE statistics require page_metadata and therefore this index.
+   * Required when PageMetadata is present. PAGE statistics require
+   * PageMetadata.page_first_rows and therefore this index.
    * Otherwise it may be omitted; source page headers then supply page grouping.
    */
   2: optional StreamLocation page_index;
 }
 
-/** Dictionary table and optional page locations. Chunk extents are stored
- * directly in ColumnChunkMetadata. Dictionary IDs address table positions;
+/** Dictionary table. Chunk extents are stored directly in ColumnChunkMetadata.
+ * Dictionary IDs address table positions;
  * no additional dictionary-to-column index or region map is stored.
  */
-struct DataLocation {
+struct DictionaryMetadata {
   /** list<i64>; number of values = D; D must fit in signed i32.
    * Nullability: list and values are non-null.
    * Absolute offsets of complete source dictionary pages, including headers.
@@ -133,21 +132,11 @@ struct DataLocation {
   /** list<i64>; number of values = D.
    * Nullability: list and values are non-null; all lengths are positive.
    * Stored byte lengths, including the dictionary page header and body.
-   * Dictionary d occupies [dictionary_offsets[d], offset + dictionary_lengths[d]).
+   * Dictionary d occupies [dictionary_offsets[d],
+   * dictionary_offsets[d] + dictionary_lengths[d]).
    * Extents are disjoint from data extents and other dictionary entries.
    */
   2: required StreamLocation dictionary_lengths;
-
-  /** list<i64>; number of values = P.
-   * Nullability: list and values are non-null. No repetition/definition levels.
-   * Requires DataLayout.page_index, shared with page_first_rows.
-   * Offsets are RELATIVE to ColumnChunkMetadata.data_offsets[k]. Each nonempty
-   * chunk starts at 0 and strictly increases below data_lengths[k]; the last
-   * page ends at data_offsets[k] + data_lengths[k]. Retain the first zero even
-   * for a single-page chunk, so positions align with other page fields.
-   * If absent, locating interior pages requires scanning source-data page headers.
-   */
-  3: optional StreamLocation relative_page_offsets;
 }
 
 struct RowGroupMetadata {
@@ -177,7 +166,7 @@ struct ColumnChunkMetadata {
 
   /** list<i32>; number of values = K.
    * Nullability: list is non-null; values are nullable.
-   * Null means no dictionary. Present values are table IDs in [0,D).
+   * Null means no dictionary. Present values index DictionaryMetadata in [0,D).
    * Only this chunk field stores null levels;
    * they describe dictionary presence, not column/chunk list boundaries.
    * Multiple chunks OF THE SAME PHYSICAL COLUMN may reference the same ID.
@@ -237,14 +226,30 @@ struct ColumnChunkMetadata {
   8: required StreamLocation data_lengths;
 }
 
+/** Independently optional page fields sharing DataLayout.page_index.
+ * Omit this struct when neither stream is present.
+ */
 struct PageMetadata {
   /** list<i64>; number of values = P.
    * Nullability: list and values are non-null. No repetition/definition levels.
    * Absolute first-row indexes, grouped by DataLayout.page_index.
-   * This stream may exist without relative_page_offsets; it still requires
-   * page_index. Chunk membership and num_values do not supply row positions.
+   * Required for PAGE statistics, including independently encrypted statistics.
+   * Otherwise optional, independently of relative_page_offsets. If absent,
+   * read source-data pages to determine row positions. Chunk membership and
+   * num_values do not supply row positions.
    */
-  1: required StreamLocation page_first_rows;
+  1: optional StreamLocation page_first_rows;
+
+  /** list<i64>; number of values = P.
+   * Nullability: list and values are non-null. No repetition/definition levels.
+   * Requires DataLayout.page_index; page_first_rows is independently optional.
+   * Offsets are RELATIVE to ColumnChunkMetadata.data_offsets[k]. Each nonempty
+   * chunk starts at 0 and strictly increases below data_lengths[k]; the last
+   * page ends at data_offsets[k] + data_lengths[k]. Retain the first zero even
+   * for a single-page chunk, so positions align with other page fields.
+   * If absent, locating interior pages requires scanning source-data page headers.
+   */
+  2: optional StreamLocation relative_page_offsets;
 }
 
 /** How one statistics set obtains its row ranges. */
@@ -463,12 +468,12 @@ struct FileInfo {
 }
 
 /** Stream directory. The directory and column-key descriptors remain visible.
- * Page metadata, when present, contains row positions for all P data pages;
- * otherwise read source-data pages to determine their row positions.
- * Relative page offsets are independently optional.
+ * Each present PageMetadata stream has P positions. Page row positions and
+ * relative byte offsets are independently optional; source-data pages supply
+ * information omitted from these streams.
  *
  * File layout: [source data][metadata streams and column-statistics blocks]
- * [Compact-Thrift ExplicitIndexFooter][28-byte signature when crypto_metadata is present]
+ * [Compact-Thrift ModularFooterV2][28-byte signature when crypto_metadata is present]
  * [u64 LE absolute root offset][PAR3].
  *
  * Authenticate the exact serialized root bytes before trusting the directory
@@ -483,7 +488,8 @@ struct FileInfo {
  *           + LE32(each path component) + LE64(offset) + LE64(length) + LE32(codec).
  *   column stats: file AAD + NEW_ROW_RANGE_STATISTICS_TYPE + LE32(version) + LE32(column ordinal).
  * Stream paths contain Thrift field IDs and zero-based list positions from the
- * root: [6,7] identifies data_offsets; [8,g,2,7] identifies granularity g's
+ * root: [6,7] identifies data_offsets; [4,1] identifies dictionary_offsets;
+ * [7,2] identifies relative_page_offsets; [8,g,2,7] identifies granularity g's
  * min_max_int32. The schema distinguishes field IDs from list positions.
  * Numeric module-type allocations are pending; do not reuse existing PME IDs.
  *
@@ -491,13 +497,13 @@ struct FileInfo {
  * Verify each selected stream before parsing its pages. Enforce the caller's
  * expected protection policy; stripping crypto metadata must not downgrade a file.
  */
-struct ExplicitIndexFooter {
-  1: required i32 version; // Experiment V38; reject V35 leading-zero indexes and V31 regions.
+struct ModularFooterV2 {
+  1: required i32 version; // Allocation pending; do not serialize this layout as V38.
 
   /** Exactly one of file_info and encrypted_file_info must be present. */
   2: optional FileInfo file_info;
   3: required DataLayout data_layout;
-  4: required DataLocation data_location;
+  4: required DictionaryMetadata dictionary_metadata;
   5: optional RowGroupMetadata row_group_metadata;
   6: required ColumnChunkMetadata column_chunk_metadata;
   7: optional PageMetadata page_metadata;

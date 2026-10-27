@@ -1,6 +1,6 @@
 # Proposal: extending the modular footer with flexible layouts and typed metadata streams
 
-Status: design draft for discussion, based on the [current modular footer](../modular-footer/ModularFooter.thrift). The [complete proposed Thrift definition](ExplicitIndexFooter.thrift) accompanies this document and imports only standard Parquet types from `parquet.thrift`.
+Status: design draft for discussion, based on the [current modular footer](../modular-footer/ModularFooter.thrift). The [complete proposed Thrift definition](proposal/ModularFooterV2.thrift) accompanies this document and imports only standard Parquet types from `parquet.thrift`.
 
 ## Changes from the current modular footer, and why
 
@@ -22,7 +22,7 @@ The main tradeoff is size versus access granularity. Explicit indexes locate log
 
 ## Representation
 
-The footer directory contains `FileInfo`, `DataLayout`, `DataLocation`, `ColumnChunkMetadata`, and optional page, row-group, statistics, and key/value metadata. The source schema is stored once in `FileInfo`. Each array field contains a `StreamLocation`:
+The footer directory contains `FileInfo`, `DataLayout`, `DictionaryMetadata`, `ColumnChunkMetadata`, and optional page, row-group, statistics, and key/value metadata. `DictionaryMetadata` stores dictionary offsets and lengths; `PageMetadata` stores independently optional page offsets and row positions. The source schema is stored once in `FileInfo`. Each array field contains a `StreamLocation`:
 
 ```thrift
 struct StreamLocation {
@@ -81,11 +81,11 @@ The equivalent logical page-offset grouping is `[[[0, 100], [0]], [[0, 200]]]`. 
 
 `ColumnChunkMetadata.data_offsets` and `data_lengths` are non-null `list<i64>` streams with `K` values each. Chunk `k` occupies `[data_offsets[k], data_offsets[k] + data_lengths[k])`, containing its contiguous complete data pages, including headers and excluding dictionary bytes. Offsets are absolute and lengths are explicit. No region map, chunk adjacency, fixed row-group layout, or file-order chunk traversal is required.
 
-`DataLocation.dictionary_offsets` and `dictionary_lengths` form a table with `D` non-null `i64` values in each stream. Entry `d` locates one complete dictionary page, including its header. `ColumnChunkMetadata.dictionary_ids` has `K` nullable `i32` values: null means no dictionary; otherwise the ID is in `[0,D)`. Several chunks of the same physical column may reference one entry, provided their dictionary decoding is compatible. Cross-column dictionary sharing is not permitted. Table entries are stored once and need not follow file order; assigning IDs in first-reference order is a writer choice that encoded well in the prototype. With no dictionaries, both table streams are empty and all chunk IDs are null.
+`DictionaryMetadata.dictionary_offsets` and `dictionary_lengths` form a table with `D` non-null `i64` values in each stream. Entry `d` locates one complete dictionary page, including its header. `ColumnChunkMetadata.dictionary_ids` has `K` nullable `i32` values: null means no dictionary; otherwise the ID is in `[0,D)`. Several chunks of the same physical column may reference one entry, provided their dictionary decoding is compatible. Cross-column dictionary sharing is not permitted. Table entries are stored once and need not follow file order; assigning IDs in first-reference order is a writer choice that encoded well in the prototype. With no dictionaries, both table streams are empty and all chunk IDs are null.
 
-`relative_page_offsets` contains one non-null `i64` per page, relative to its chunk's `data_offsets[k]`. The first offset of each nonempty chunk is zero. A page ends at the next page offset in that chunk, or at `data_offsets[k] + data_lengths[k]` for the last page.
+`PageMetadata.relative_page_offsets` contains one non-null `i64` per page, relative to its chunk's `data_offsets[k]`. The first offset of each nonempty chunk is zero. A page ends at the next page offset in that chunk, or at `data_offsets[k] + data_lengths[k]` for the last page.
 
-The page-offset stream is optional. When present, it has exactly `P` positions, including the zero for a single-page chunk. A reader that knows a chunk has one page can derive its byte extent from the chunk's offset and length without reading that offset. Omitting the first offset from storage would require remapping page positions for the shorter offset array, including handling empty chunks; this draft keeps those positions aligned with other page fields. `page_index` is required whenever page offsets or page-row metadata is present.
+The page-offset and page-row streams are independently optional. Each present stream has exactly `P` positions; the offset stream includes the zero for a single-page chunk. A reader that knows a chunk has one page can derive its byte extent from the chunk's offset and length without reading that offset. Omitting the first offset from storage would require remapping page positions for the shorter offset array, including handling empty chunks; this draft keeps those positions aligned with other page fields. `page_index` is required whenever `PageMetadata` is present. PAGE statistics require `page_first_rows`; omit `PageMetadata` when both streams are absent.
 
 Optional row-group metadata retains row counts. Its optional `row_group_offsets` stream holds `G + 1` absolute byte boundaries only when complete row groups occupy contiguous intervals in row-group order. Interleaved layouts or dictionaries shared across row groups can omit this byte-range hint; chunk and dictionary locations remain sufficient.
 
@@ -154,15 +154,17 @@ The public encoding profile, format version, and protection identifiers require 
 
 For exceptionally wide files, such as 30,000 physical columns, location metadata alone may be large even when a query needs only a few columns. Optional column sets would partition metadata into groups of complete columns, allowing a reader to fetch and interpret the selected groups' location streams. This grouping would not constrain where source data is placed.
 
-Each set would reuse the base representation with local chunk/page indexes and dictionary IDs; the source schema would remain shared. Since dictionaries are reused only within a column, keeping complete columns together avoids cross-set dictionary references or duplication. Chunk/page statistics would reuse the set's indexes and row starts; arbitrary ranges would retain their own boundaries.
+The [column-set draft](proposal/ColumnSetFooter.thrift) lists each set's physical `column_ordinals`, allowing noncontiguous groups in any order. The list length gives the local column count, so neither `first_column` nor `num_columns` is stored. Every physical column occurs in exactly one set, including columns with no chunks; the total count is checked against the shared source schema. Each set reuses the current base types with local cumulative-end chunk/page indexes and dictionary IDs. Since dictionaries are reused only within a column, keeping complete columns together avoids cross-set dictionary references or duplication. Chunk/page statistics reuse the set's indexes and row starts; arbitrary ranges retain their own boundaries.
 
 A column set is a logical grouping. Every stream would retain its own offset, length, and codec, with no requirement for a set's metadata to be contiguous. Readers could fetch location streams first and statistics leaves later. Decoding a leaf's values is independent of sibling leaves; interpreting its positions still requires the shared indexes and applicable row metadata.
 
-Smaller sets reduce metadata fetched for narrow projections but add descriptors and may weaken encoding. Membership encoding (contiguous ranges versus explicit column ordinals), group size, and the extension's directory and protection rules remain open. The [column-set prototype](ColumnSetFooter.thrift) explores contiguous ranges with independently located streams; it is supporting work, not part of the base format or a commitment to that membership representation.
+Smaller sets reduce metadata fetched for narrow projections but add descriptors and may weaken encoding. This optional draft uses explicit membership lists and independently located streams; group size and protection rules remain open. It is a future extension outside the base format. The revised column-set directory has not been benchmarked; historical contiguous-set experiments use different definitions.
 
 ## Size and decoding comparison
 
 V38 is compared with the existing Parquet Compact-Thrift footer (current) and the modular footer on the same inputs. Size and decoding measurements cover all 12 datasets, with all three formats interleaved in each timing run. Metadata is encoded without Zstd. V38 uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.
+
+These results use the [V38 benchmark definition](ExplicitIndexFooter.thrift), before the review draft split out `DictionaryMetadata` and moved page offsets into `PageMetadata`. The reorganized directory requires a new wire version; its sizes and decoding timings have not been remeasured.
 
 ### Size
 
@@ -337,4 +339,4 @@ See the [full measurements and validation](V38-MEASUREMENTS.md), [comparison CSV
 
 ## Supporting material
 
-The [full IDL](ExplicitIndexFooter.thrift) defines each field's type, value count, nullability, and dependencies. [V38 measurements](V38-MEASUREMENTS.md) compare the current draft with current Parquet Thrift and the modular footer. Historical [V35 direct-offset results](DIRECT-OFFSETS.md) and [V31 explicit-index](legacy/ExplicitIndexFooterV31.thrift)/[V32 nested-layout](ImplicitLevelsFooter.thrift) experiments describe earlier revisions. Production encryption and a public interoperability suite remain outside the validated scope.
+The [full IDL](proposal/ModularFooterV2.thrift) defines each field's type, value count, nullability, and dependencies; the [column-set extension](proposal/ColumnSetFooter.thrift) reuses those types. [V38 measurements](V38-MEASUREMENTS.md) compare the preceding benchmark definition with current Parquet Thrift and the modular footer. Historical [V35 direct-offset results](DIRECT-OFFSETS.md) and [V31 explicit-index](legacy/ExplicitIndexFooterV31.thrift)/[V32 nested-layout](ImplicitLevelsFooter.thrift) experiments describe earlier revisions. Production encryption and a public interoperability suite remain outside the validated scope.

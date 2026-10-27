@@ -431,6 +431,7 @@ def report(a):
         timing_tables.append('')
     section=['## Size and decoding comparison','',
         'V38 is compared with the existing Parquet Compact-Thrift footer (current) and the modular footer on the same inputs. Size and decoding measurements cover all 12 datasets, with all three formats interleaved in each timing run. Metadata is encoded without Zstd. V38 uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.','',
+        'These results use the [V38 benchmark definition](ExplicitIndexFooter.thrift), before the review draft split out `DictionaryMetadata` and moved page offsets into `PageMetadata`. The reorganized directory requires a new wire version; its sizes and decoding timings have not been remeasured.','',
         '### Size','',
         'All values are bytes of complete metadata at each cumulative scope, including schema, directories, page headers, required external indexes, and trailer. Each table includes every dataset in the corpus.','']+size_tables
     core={variant:sum(r[variant] for r in baseline if r['scope']==0) for variant in ('current','modular')}
@@ -470,7 +471,7 @@ def report(a):
     start=text.index('## Supporting material\n')
     text=text[:start]+'''## Supporting material
 
-The [full IDL](ExplicitIndexFooter.thrift) defines each field's type, value count, nullability, and dependencies. [V38 measurements](V38-MEASUREMENTS.md) compare the current draft with current Parquet Thrift and the modular footer. Historical [V35 direct-offset results](DIRECT-OFFSETS.md) and [V31 explicit-index](legacy/ExplicitIndexFooterV31.thrift)/[V32 nested-layout](ImplicitLevelsFooter.thrift) experiments describe earlier revisions. Production encryption and a public interoperability suite remain outside the validated scope.
+The [full IDL](proposal/ModularFooterV2.thrift) defines each field's type, value count, nullability, and dependencies; the [column-set extension](proposal/ColumnSetFooter.thrift) reuses those types. [V38 measurements](V38-MEASUREMENTS.md) compare the preceding benchmark definition with current Parquet Thrift and the modular footer. Historical [V35 direct-offset results](DIRECT-OFFSETS.md) and [V31 explicit-index](legacy/ExplicitIndexFooterV31.thrift)/[V32 nested-layout](ImplicitLevelsFooter.thrift) experiments describe earlier revisions. Production encryption and a public interoperability suite remain outside the validated scope.
 '''
     proposal.write_text(text)
     lines=['# V38 size and decoding measurements','',

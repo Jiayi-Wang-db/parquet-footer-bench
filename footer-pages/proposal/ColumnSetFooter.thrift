@@ -1,19 +1,29 @@
-/** Optional future-extension prototype V37; outside the base footer proposal.
- * Membership encoding remains open; contiguous ranges below are one experiment.
- * No public wire-version allocation.
+/** Optional extension for very wide files, such as 30,000 physical columns.
+ * Each set lists its physical-column ordinals, allowing noncontiguous groups.
  * Every set's stream descriptors are inline in the common footer directory.
  * Each stream is independently located; sets impose no byte-contiguity rule.
- * Pinned to V35's leading-zero indexes; the current base draft uses cumulative
- * ends with an implicit initial zero. Row-group descriptors and encryption
- * are outside this experiment.
+ * Reuses the current ModularFooterV2 types and cumulative-end indexes with an
+ * implicit initial zero. Row-group descriptors and encryption are outside this
+ * plaintext draft. Wire version and magic allocation are pending.
  */
-include "../legacy/ExplicitIndexFooterV35.thrift"
+include "ModularFooterV2.thrift"
+include "../../modular-footer/parquet.thrift"
 namespace cpp parquet.columnsets
 
-/** One contiguous range of complete physical columns. Entries are ordered and
- * partition [0, FileInfo.num_columns); first_column >= 0 and num_columns > 0.
- * C = num_columns; K, P and D in reused definitions are local to this set.
- * Column c's source-schema ordinal is first_column + c.
+/** File metadata stored once. N is the number of physical leaves in schema,
+ * equal to the sum of column_ordinals.size() across all sets. No separate
+ * column count is stored. Field 1 is reserved for the former num_columns.
+ * References to FileInfo.num_rows in reused types mean this file's num_rows.
+ */
+struct FileInfo {
+  2: required i64 num_rows;
+  3: required list<parquet.SchemaElement> schema;
+  4: optional string created_by;
+}
+
+/** One logical group of complete physical columns, in any source-ordinal order.
+ * C = column_ordinals.size(); K, P and D in reused definitions are local to this set.
+ * Local column c maps to source-schema physical ordinal column_ordinals[c].
  * Every StreamLocation has an ABSOLUTE file offset, including statistics streams.
  * Source-data offsets in data_offsets and dictionary_offsets are also absolute;
  * relative_page_offsets values remain relative to their data chunk's start.
@@ -24,14 +34,23 @@ namespace cpp parquet.columnsets
  * Null slots and empty columns/chunks keep the existing explicit-index rules.
  */
 struct ColumnSetMetadata {
-  1: required i32 first_column;
-  2: required i32 num_columns;
-  3: required ExplicitIndexFooterV35.DataLayout data_layout;
-  4: required ExplicitIndexFooterV35.DataLocation data_location;
-  6: required ExplicitIndexFooterV35.ColumnChunkMetadata column_chunk_metadata;
-  7: optional ExplicitIndexFooterV35.PageMetadata page_metadata;
+  /** Inline list<i32>; one source-schema physical ordinal per local column.
+   * Nullability: list and values are non-null; list must be nonempty.
+   * Ordinals are in [0,N), distinct within and across sets, and need not be
+   * consecutive or sorted. List order defines local column order in all streams.
+   * Ordinal 0 is real membership and must be stored when included.
+   * List length gives C; no first_column or num_columns field is needed.
+   * column_chunk_index has C cumulative ends; page_index, when present, has K.
+   * Both indexes omit only their fixed leading zero; genuine zero ends remain.
+   * Field 2 is reserved for the former num_columns.
+   */
+  1: required list<i32> column_ordinals;
+  3: required ModularFooterV2.DataLayout data_layout;
+  4: required ModularFooterV2.DictionaryMetadata dictionary_metadata;
+  6: required ModularFooterV2.ColumnChunkMetadata column_chunk_metadata;
+  7: optional ModularFooterV2.PageMetadata page_metadata;
 
-  /** Statistics descriptors for this same column range, inline in the directory.
+  /** Statistics descriptors for these same local columns, inline in the directory.
    * Each leaf is an independently fetchable stream. COLUMN_CHUNK/PAGE keep
    * unknown slots and reuse this set's indexes and chunk/page row starts;
    * only ARBITRARY stores its own column index and row starts.
@@ -40,23 +59,27 @@ struct ColumnSetMetadata {
    * require fetching statistics payloads. Decoding one leaf's values does
    * not require sibling leaves; interpreting ranges requires shared metadata.
    */
-  8: optional list<ExplicitIndexFooterV35.ColumnRangeStatistics> row_range_statistics;
+  8: optional list<ModularFooterV2.ColumnRangeStatistics> row_range_statistics;
 }
 
 /** Tail: [independently located streams][Compact-Thrift root]
- * [u64 LE absolute root offset][CST4]. V37/CST4 are local experiment identifiers.
+ * [u64 LE absolute root offset][column-set magic; allocation pending].
  * Stream extents must lie before the root, within the file and not overlap.
  * Streams from different sets or fields may be interleaved or separated by gaps.
  * No set-level offset/length, embedded payload, or ordering by set is required.
- * Readers fetch the directory, then only the streams needed for their projection.
- * Validate stream extents and column partitions before dependent reads.
+ * Readers fetch the directory, then location streams for the selected sets.
+ * Statistics leaves can be fetched later using the same local hierarchy.
+ * Validate stream extents and column membership before dependent reads.
  * FileInfo/schema is stored once; set size is a writer choice. Column chunk
- * counts may differ, including zero. A zero-column file has an empty set list.
- * V36/CST3 used contiguous blocks; see ../legacy/ColumnSetFooterV36.thrift.
- * V33/CST1 and V34/CST2 used region maps. Reject these versions with this schema.
+ * counts may differ, including zero. Every physical column occurs in exactly
+ * one set, including columns with no chunks. A zero-column file has no sets.
+ * Set order is unrestricted; the union of column_ordinals must equal [0,N).
+ * Validate against the schema; reject duplicate, missing or out-of-range ordinals.
+ * This directory layout requires a new version; it does not read historical
+ * column-set artifacts that used contiguous column ranges or leading-zero indexes.
  */
 struct ColumnSetFooter {
-  1: required i32 version;
-  2: required ExplicitIndexFooterV35.FileInfo file_info;
+  1: required i32 version; // Allocation pending.
+  2: required FileInfo file_info;
   3: required list<ColumnSetMetadata> column_sets;
 }
