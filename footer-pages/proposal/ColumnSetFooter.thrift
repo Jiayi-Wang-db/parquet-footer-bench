@@ -2,7 +2,7 @@
  * Sets group complete columns by explicit ordinal, including noncontiguous groups.
  * Descriptors are inline; streams are independently located, with no set-level
  * contiguity requirement. Reuses ModularFooterV2 cumulative-end indexes.
- * Row-group descriptors and encryption are outside this plaintext draft.
+ * This extension defines plaintext metadata without row-group descriptors.
  * Wire version and magic allocation are pending.
  */
 include "ModularFooterV2.thrift"
@@ -10,7 +10,7 @@ include "../../modular-footer/parquet.thrift"
 namespace cpp parquet.columnsets
 
 /** Stored once. N = physical leaves in schema = total column_ordinals entries.
- * Field 1 (former num_columns) is reserved. Reused types refer to this num_rows.
+ * Field 1 is reserved. Reused types refer to this num_rows.
  */
 struct FileInfo {
   2: required i64 num_rows;
@@ -29,7 +29,7 @@ struct ColumnSetMetadata {
   /** Inline list<i32>; number of values = C > 0; list and values non-null.
    * Source ordinals in [0,N), distinct across all sets; any order is allowed.
    * List order defines local column order. Retain ordinal 0 when included.
-   * Field 2 (former num_columns) is reserved.
+   * Field 2 is reserved.
    */
   1: required list<i32> column_ordinals;
   3: required ModularFooterV2.DataLayout data_layout;
@@ -46,7 +46,9 @@ struct ColumnSetMetadata {
 }
 
 /** Tail: [independently located streams][Compact-Thrift root]
- * [u64 LE absolute root offset][column-set magic; allocation pending].
+ * [u32 LE directory length][4-byte column-set magic; allocation pending].
+ * Length is the Compact-Thrift root size, excluding the 8-byte trailer.
+ * The root starts at file_size - 8 - directory_length; validate bounds first.
  * Validate extents: within file, before root, nonoverlapping; interleaving/gaps allowed.
  * Set size/order is unrestricted. Every physical column belongs to exactly one
  * set, including empty columns; a zero-column file has no sets. Validate membership

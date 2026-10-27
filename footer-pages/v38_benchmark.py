@@ -413,7 +413,7 @@ def report(a):
     size_tables=[]
     for scope,label in labels.items():
         size_tables+=['#### '+label,'',
-                      '| Dataset | Current Parquet Thrift | Modular footer | V38 |','|---|---:|---:|---:|']
+                      '| Dataset | Current Parquet Thrift | Modular footer | Benchmark implementation |','|---|---:|---:|---:|']
         for name in names:
             b=bases[name,scope];v=byte_sizes[name,scope]['bytes']
             size_tables.append(f"| {names[name]} | {b['current']:,} | {b['modular']:,} | {v:,} |")
@@ -424,29 +424,29 @@ def report(a):
     timing_tables=[]
     for scope,title in queries.items():
         timing_tables+=['#### '+title,'',
-                       '| Dataset | Current Parquet Thrift | Modular footer | V38 |','|---|---:|---:|---:|']
+                       '| Dataset | Current Parquet Thrift | Modular footer | Benchmark implementation |','|---|---:|---:|---:|']
         for name in names:
             cells=[' / '.join(f"{timing[name,scope,v,w]:,.2f}" for w in ('one','all')) for v in ('current','modular','v38')]
             timing_tables.append('| '+names[name]+' | '+' | '.join(cells)+' |')
         timing_tables.append('')
     section=['## Size and decoding comparison','',
-        'V38 is compared with the existing Parquet Compact-Thrift footer (current) and the modular footer on the same inputs. Size and decoding measurements cover all 12 datasets, with all three formats interleaved in each timing run. Metadata is encoded without Zstd. V38 uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.','',
-        'These results use the [V38 benchmark definition](ExplicitIndexFooter.thrift), before the review draft split out `DictionaryMetadata` and moved page offsets into `PageMetadata`. The reorganized directory requires a new wire version; its sizes and decoding timings have not been remeasured.','',
+        'The benchmark compares the proposed stream representation with the existing Parquet Compact-Thrift footer and the modular footer on the same 12 datasets. All three implementations are interleaved in each timing run. Metadata is encoded without Zstd. The benchmark implementation uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.','',
+        'Benchmark scope: the tables use the [benchmark directory schema](ExplicitIndexFooter.thrift). They measure the stream representation, but do not establish exact sizes or decoding times for the proposed directory serialization. Encryption and column sets are not measured.','',
         '### Size','',
         'All values are bytes of complete metadata at each cumulative scope, including schema, directories, page headers, required external indexes, and trailer. Each table includes every dataset in the corpus.','']+size_tables
     core={variant:sum(r[variant] for r in baseline if r['scope']==0) for variant in ('current','modular')}
     total=sum(r['bytes'] for r in sizes if r['scope']==0)
     delta=sum(r['bytes']-r['v35_bytes'] for r in sizes if r['scope']==0 and r['v35_bytes'] is not None)
     sparse_note='FineWeb has no page statistics for one column. Its page-statistics set uses the supported ARBITRARY form to preserve that sparse coverage; complete chunk/page sets reuse the shared indexes.'
-    section+=[f"Across all 12 datasets, core metadata totals **{core['current']:,} bytes** for current Thrift, **{core['modular']:,}** for modular, and **{total:,}** for V38: reductions of {100*(1-total/core['current']):.1f}% and {100*(1-total/core['modular']):.1f}%, respectively. Small core footers can still be larger than modular. For the eight datasets with V35 measurements, omitting the initial zeros changes the core total by only {delta:+,} byte; encoding headers and first-value encoding can offset the removed values.",'',
+    section+=[f"Across all 12 datasets, core metadata totals **{core['current']:,} bytes** for current Thrift, **{core['modular']:,}** for modular, and **{total:,}** for the benchmark implementation: reductions of {100*(1-total/core['current']):.1f}% and {100*(1-total/core['modular']):.1f}%, respectively. Small core footers can be larger than modular.",'',
         sparse_note,'',
         '### Decoding time','',
         'Microseconds per query; lower is better. Each cell is **one column / all columns**. All 12 datasets are shown for each query.','']+timing_tables
     cases=list(itertools.product(names,queries,('one','all')))
     faster={v:sum(timing[n,s,'v38',w]<timing[n,s,v,w] for n,s,w in cases) for v in ('current','modular')}
-    speed_summary=(f"V38 takes less decoding time than current Parquet Thrift in **{faster['current']}/{len(cases)}** "
+    speed_summary=(f"The benchmark implementation takes less decoding time than current Parquet Thrift in **{faster['current']}/{len(cases)}** "
                    f"measured cases and less than modular in **{faster['modular']}/{len(cases)}**. "
-                   'Each case is one dataset, query, and projection; these prototype results do not establish a universal decoding advantage.')
+                   'Each case is one dataset, query, and projection; performance depends on the workload and reader implementation.')
     regressions=['### Cases more than 10% slower than modular','',
                  'Percentages compare decoding time using unrounded medians.','',
                  '| Query | One column | All columns |','|---|---|---|']
@@ -457,22 +457,20 @@ def report(a):
             cells.append('; '.join(f'{names[n]} +{100*delta:.1f}%' for delta,n in sorted(slower,reverse=True) if delta>0.1) or 'None')
         regressions.append('| '+title+' | '+' | '.join(cells)+' |')
     regressions.append('')
-    reader_update=('This rerun optimizes the V38 reader on unchanged footer bytes: core scalar callbacks avoid copying value wrappers, '
-                   'full core reads reuse a decoded dictionary-offset table, and range reads visit only overlapping metadata pages and skip redundant bulk rank scans. '
-                   'The dictionary cache adds 8 bytes per dictionary entry for full core reads. The schema, stored encodings, and sizes are unchanged.')
+    reader_details='The benchmark reader caches dictionary offsets for full core reads, using 8 bytes per dictionary entry. Range reads visit only overlapping metadata pages.'
     section+=[
-        speed_summary,'',reader_update,'']+regressions+[
-        'Queries use fresh prototype readers over memory-resident bytes, including parsing, decoding, allocation, constructing projected values, and checksumming; file I/O is excluded. One-column results are medians across nine column positions and read every chunk/page needed for that column. Each format ran seven trials in each of three processes per dataset, pinned to CPU 16 on an Intel Xeon Platinum 8375C. All timings were rerun with the optimized reader; the eight-dataset and four-dataset suites use the same executable and protocol. Queried fields can be a subset of the retained metadata. Comparisons cover placement and supported pruning information, rather than exact null-count queries.','',
-        'See the [full measurements and validation](V38-MEASUREMENTS.md), [comparison CSV](proposal-comparison.csv), and [saved samples and provenance](v38-results.json.gz). Sizes and timings here both measure V38; they do not reuse V31 timings.','',
-        'The preferred benchmark configuration now uses ordinary-frame PFOR for relative page offsets and retains adaptive encoding for the hierarchy indexes. In the [encoding-only follow-up](V38-PFOR.md), this reduces selective decoding time for chunk metadata plus page locations by 4.0% relative to size-minimized V38. Retained metadata at that scope totals 3,826,102 bytes versus modular\'s 8,830,452 bytes (56.7% smaller); full metadata totals 12,321,007 versus 25,272,629 bytes (51.2% smaller). Both scopes remain smaller than modular on all 12 datasets. The modest size increase over V38 is accepted for the measured speed benefit. The tables above retain the original V38 configuration; the follow-up reports the preferred variant separately. This is an implementation choice, not a required public PFOR encoding.','']
+        speed_summary,'',reader_details,'']+regressions+[
+        'Queries construct fresh readers over memory-resident bytes and include parsing, decoding, allocation, projected values, and checksumming; file I/O is excluded. One-column results are medians across nine column positions and read every chunk/page needed for that column. Each format runs seven trials in each of three processes per dataset, pinned to CPU 16 on an Intel Xeon Platinum 8375C, using the same executable and protocol across all datasets. Queried fields can be a subset of the retained metadata. Comparisons cover placement and supported pruning information; exact null-count queries are excluded.','',
+        'See the [measurement details and validation](V38-MEASUREMENTS.md), [comparison CSV](proposal-comparison.csv), and [samples and provenance](v38-results.json.gz).','',
+        'The tables use size-minimizing encoding. The recommended [encoding policy](V38-PFOR.md) uses ordinary-frame PFOR for relative page offsets and adaptive encoding for hierarchy indexes. Matched measurements show 4.0% lower selective decoding time for chunk metadata plus page locations than size-minimizing encoding. Metadata at that scope totals 3,826,102 bytes versus modular\'s 8,830,452 bytes (56.7% smaller); full metadata totals 12,321,007 versus 25,272,629 bytes (51.2% smaller). Both scopes are smaller than modular on all 12 datasets. Encoding policy is a writer choice; the schema does not mandate PFOR.','']
     proposal=HERE/'PROPOSAL.md';text=proposal.read_text()
     start=text.index('## Size and decoding comparison\n');end=text.index('## Supporting material\n',start)
     text=text[:start]+'\n'.join(section)+'\n'+text[end:]
-    # Replace stale benchmark status while retaining the historical schema references.
+    # Keep supporting links aligned with the presentation.
     start=text.index('## Supporting material\n')
     text=text[:start]+'''## Supporting material
 
-The [full IDL](proposal/ModularFooterV2.thrift) defines each field's type, value count, nullability, and dependencies; the [column-set extension](proposal/ColumnSetFooter.thrift) reuses those types. [V38 measurements](V38-MEASUREMENTS.md) compare the preceding benchmark definition with current Parquet Thrift and the modular footer. Historical [V35 direct-offset results](DIRECT-OFFSETS.md) and [V31 explicit-index](legacy/ExplicitIndexFooterV31.thrift)/[V32 nested-layout](ImplicitLevelsFooter.thrift) experiments describe earlier revisions. Production encryption and a public interoperability suite remain outside the validated scope.
+The [full IDL](proposal/ModularFooterV2.thrift) defines each field's type, value count, nullability, and dependencies. The optional [column-set extension](proposal/ColumnSetFooter.thrift) reuses those types. [Benchmark details](V38-MEASUREMENTS.md) document the inputs, methodology, validation, and reproducibility requirements. Encryption and public interoperability are outside the benchmark validation scope.
 '''
     proposal.write_text(text)
     lines=['# V38 size and decoding measurements','',
@@ -493,7 +491,7 @@ The [full IDL](proposal/ModularFooterV2.thrift) defines each field's type, value
         '## Decoding by query','',
         'Times are microseconds per query. Each cell is **one column / all columns**. One-column values are the median over nine selected positions, after taking each position’s median across three fresh processes. Every process runs seven shuffled trials per case. All three formats are interleaved on CPU 16 (Intel Xeon Platinum 8375C); input bytes are resident, and each query constructs a new reader. All timings were rerun with the optimized reader, using the same executable for the eight-dataset and four-dataset suites.','']
     lines += [line.replace('#### ','### ',1) for line in timing_tables]
-    lines += [speed_summary,'',reader_update,'']+regressions
+    lines += [speed_summary,'',reader_details,'']+regressions
     wins={(scope,w):sum(timing[name,scope,'v38',w]<timing[name,scope,'modular',w] for name in names)
           for scope in queries for w in ('one','all')}
     lines+=['## Scope and validation','',

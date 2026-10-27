@@ -1,22 +1,22 @@
 # Proposal: extending the modular footer with flexible layouts and typed metadata streams
 
-Status: design draft for discussion, based on the [current modular footer](../modular-footer/ModularFooter.thrift). The [complete proposed Thrift definition](proposal/ModularFooterV2.thrift) accompanies this document and imports only standard Parquet types from `parquet.thrift`.
+This proposal extends the [current modular footer](../modular-footer/ModularFooter.thrift). The [complete proposed Thrift definition](proposal/ModularFooterV2.thrift) accompanies this document and imports only standard Parquet types from `parquet.thrift`.
 
 ## Changes from the current modular footer, and why
 
-The current modular footer separates placement, statistics, page indexes, and descriptive metadata into independently readable modules. It already uses typed arrays, direct chunk offsets, and positional indexing. This proposal keeps those foundations and changes the following:
+The current modular footer separates placement, statistics, page indexes, and descriptive metadata into independently readable modules. It uses typed arrays, direct chunk offsets, and positional indexing. The proposed changes are:
 
 | Area | Current modular footer | Proposed change | Why |
 |---|---|---|---|
 | **Column/chunk layout** | Chunk positions use `column * num_row_groups + row_group`, with one chunk per column per row group. | Use one shared `column_chunk_index`; row-group metadata becomes optional. | Allow each column to have its own chunk count, including zero, so dense and sparse columns can be organized independently. |
 | **Page metadata** | Each chunk has separate offset-index and column-index descriptors, located through `PageIndexModule.chunk_offsets`. Page locations store offsets and sizes. | Flatten page fields under one shared `page_index`. Store chunk-relative page offsets, derive page lengths from the next offset or chunk end, and use file-relative row positions. | Reuse the same page positions across locations, row positions, and statistics; remove per-chunk descriptors and support layouts without row groups. |
 | **Statistics ranges** | Separate `ColumnStatistics` and `ColumnIndexChunk` structures describe row-group and page statistics. | Use one statistics structure tagged `COLUMN_CHUNK`, `PAGE`, or `ARBITRARY`; allow multiple range sets. | Support statistics whose row ranges differ from physical chunk/page boundaries. Chunk/page tags reuse existing indexes and row starts instead of storing them again. |
-| **Dictionary locations** | `first_dictionary_pages` indexes a flattened list of dictionary offsets; placement also stores per-chunk total sizes. | Keep direct data offsets, give data and dictionaries separate lengths, and reference a distinct dictionary table by nullable chunk ID. | Store a dictionary extent once for reuse within a column, and locate data and dictionary bytes independently. This draft supports at most one dictionary per chunk. |
+| **Dictionary locations** | `first_dictionary_pages` indexes a flattened list of dictionary offsets; placement also stores per-chunk total sizes. | Keep direct data offsets, give data and dictionaries separate lengths, and reference a distinct dictionary table by nullable chunk ID. | Store a dictionary extent once for reuse within a column, and locate data and dictionary bytes independently. Each chunk references at most one dictionary. |
 | **Array encoding** | Inline `EncodedArray` values use seekable `BITSET` or `PRESENT_INDEX` encodings, without compression or cross-value dependence. | Store arrays as typed Parquet metadata page streams, with existing encodings and optional compression. | Reuse Parquet encoding implementations and exploit repeated or regular metadata values to reduce size. The tradeoff is decoding a block or page to reach some values. |
 | **Statistics values** | Min/max bounds use byte-array prefixes and suffixes with dedicated common-prefix handling. | Store paired min/max values in streams of their physical type. | Apply ordinary typed encodings to bounds and avoid a separate min/max prefix representation. |
 | **Metadata directory** | The root locates modules; statistics and page-index modules locate further descriptors containing inline arrays. | Put shared stream locations directly in the footer directory. | Reduce descriptor lookups and let readers fetch individual fields. This moves more descriptors into the initial directory. |
 
-Direct chunk offsets are retained from the current modular footer. The source schema is still stored once, and placement remains readable without statistics.
+The source schema is stored once, and placement is readable without statistics.
 
 The main tradeoff is size versus access granularity. Explicit indexes locate logical positions without reconstructing list boundaries, but encoded streams do not guarantee the current modular footer's direct positional access to packed values. Shared streams may also require reading metadata for unselected columns. [Optional column sets](#optional-future-extension-column-sets) could limit that work for exceptionally wide files; the base proposal requires no column-set wrapper or membership array.
 
@@ -39,7 +39,7 @@ struct DataLayout {
 
 Each stream contains ordinary Parquet `PageHeader`/body pairs: an optional dictionary page followed by `DATA_PAGE_V2` pages. These are **metadata pages**, separate from the source-data pages they describe. The directory points directly to streams; there is no intermediate module descriptor for each shared array.
 
-A field's ID defines its physical type, nullability, and logical domain. No additional metadata schema tree is serialized. In this proposal, `list<T>` describes an array stored in a stream, not an inline Thrift list or a nested Parquet LIST. Thrift `optional` controls whether the entire stream exists; nullable elements independently represent missing values.
+A field's ID defines its scalar Parquet type, nullability, and logical domain. No additional metadata schema tree is serialized. Each stream is a primitive column with no LIST nesting. Thrift `optional` controls whether the entire stream exists; nullable values independently represent missing values.
 
 Streams of non-null scalar values have no repetition or definition levels. Nullable scalar streams use definition levels for presence and no repetition levels. Their page headers count positions in the metadata array, including nulls, rather than rows in the source data. Encodings and compression are chosen per the standard page/stream rules; this proposal does not require a new value encoding.
 
@@ -47,12 +47,12 @@ Streams of non-null scalar values have no repetition or definition levels. Nulla
 
 Let `C` be the number of physical columns, `K` the total number of chunks, and `P` the total number of source-data pages.
 
-| Field | Type and number of values | Nullability | Meaning |
+| Field | Parquet type and number of values | Nullability | Meaning |
 |---|---|---|---|
-| `column_chunk_index` | `list<i32>`, `C` | Non-null | Column `c` ends at `index[c]`; starts at `0` if `c = 0`, otherwise `index[c-1]`. |
-| `page_index` | `list<i32>`, `K` | Non-null; stream optional | Chunk `k` ends at `index[k]`; starts at `0` if `k = 0`, otherwise `index[k-1]`. |
-| Chunk-level fields | `list<T>`, `K` | Defined per field | Ordered by column, then chunk. |
-| Page-level fields | `list<T>`, `P` | Defined per field | Ordered by flattened chunk, then page. |
+| `column_chunk_index` | `INT32`, `C` | Non-null | Column `c` ends at `index[c]`; starts at `0` if `c = 0`, otherwise `index[c-1]`. |
+| `page_index` | `INT32`, `K` | Non-null; stream optional | Chunk `k` ends at `index[k]`; starts at `0` if `k = 0`, otherwise `index[k-1]`. |
+| Chunk-level fields | Scalar type per field, `K` | Defined per field | Ordered by column, then chunk. |
+| Page-level fields | Scalar type per field, `P` | Defined per field | Ordered by flattened chunk, then page. |
 
 Both indexes store nondecreasing cumulative ends, with the initial zero implicit. When nonempty, their final entries are `K` and `P`. An empty column index means `C = K = 0`; an empty, present page index means `K = P = 0`. An absent page index does not imply zero pages. Repeated ends represent an empty column or a chunk with no pages; a first entry of zero represents an empty first column or chunk and must still be stored. Counts are the current end minus the previous end, taking the previous end as zero for the first entry. `K` and `P` must fit in signed `i32`.
 
@@ -75,19 +75,19 @@ column_chunk_metadata.first_row_index: [0, 100, 0]
 page_metadata.first_row_index: [0, 50, 100, 0, 80]
 ```
 
-The equivalent logical page-offset grouping is `[[[0, 100], [0]], [[0, 200]]]`. Its hierarchy is stored once in the two prefix arrays, rather than repeated as RL/DL in each leaf.
+The equivalent logical page-offset grouping is `[[[0, 100], [0]], [[0, 200]]]`. The two shared indexes define this grouping for every page field.
 
 ## Byte locations
 
-`ColumnChunkMetadata.offsets` and `compressed_size` are non-null `list<i64>` streams with `K` values each. Chunk `k` occupies `[offsets[k], offsets[k] + compressed_size[k])`, containing its contiguous complete data pages, including headers and excluding dictionary bytes. Offsets are absolute and lengths are explicit. No region map, chunk adjacency, fixed row-group layout, or file-order chunk traversal is required.
+`ColumnChunkMetadata.offsets` and `compressed_size` are non-null `INT64` streams with `K` values each. Chunk `k` occupies `[offsets[k], offsets[k] + compressed_size[k])`, containing its contiguous complete data pages, including headers and excluding dictionary bytes. Offsets are absolute and lengths are explicit. Chunks may appear anywhere in the file, independently of column or row-group order.
 
-`DictionaryMetadata.offsets` and `DictionaryMetadata.lengths` form a table with `D` non-null `i64` values in each stream. Entry `d` locates one complete dictionary page, including its header. `ColumnChunkMetadata.dictionary_ids` has `K` nullable `i32` values: null means no dictionary; otherwise the ID is in `[0,D)`. Several chunks of the same physical column may reference one entry, provided their dictionary decoding is compatible. Cross-column dictionary sharing is not permitted. Table entries are stored once and need not follow file order; assigning IDs in first-reference order is a writer choice that encoded well in the prototype. With no dictionaries, both table streams are empty and all chunk IDs are null.
+`DictionaryMetadata.offsets` and `DictionaryMetadata.lengths` form a table with `D` non-null `INT64` values in each stream. Entry `d` locates one complete dictionary page, including its header. `ColumnChunkMetadata.dictionary_ids` has `K` nullable `INT32` values: null means no dictionary; otherwise the ID is in `[0,D)`. Several chunks of the same physical column may reference one entry, provided their dictionary decoding is compatible. Cross-column dictionary sharing is not permitted. Table entries are stored once and need not follow file order; first-reference order is recommended. With no dictionaries, both table streams are empty and all chunk IDs are null.
 
-`PageMetadata.relative_offset` contains one non-null `i64` per page, relative to its chunk's `offsets[k]`. The first offset of each nonempty chunk is zero. A page ends at the next page offset in that chunk, or at `offsets[k] + compressed_size[k]` for the last page.
+`PageMetadata.relative_offset` contains one non-null `INT64` per page, relative to its chunk's `offsets[k]`. The first offset of each nonempty chunk is zero. A page ends at the next page offset in that chunk, or at `offsets[k] + compressed_size[k]` for the last page.
 
-The page-offset and page-row streams are independently optional. Each present stream has exactly `P` positions; the offset stream includes the zero for a single-page chunk. A reader that knows a chunk has one page can derive its byte extent from the chunk's offset and length without reading that offset. Omitting the first offset from storage would require remapping page positions for the shorter offset array, including handling empty chunks; this draft keeps those positions aligned with other page fields. `page_index` is required whenever `PageMetadata` is present. PAGE statistics require `PageMetadata.first_row_index`; omit `PageMetadata` when both streams are absent.
+The page-offset and page-row streams are independently optional. Each present stream has exactly `P` positions; the offset stream includes the zero for a single-page chunk. A reader that knows a chunk has one page can derive its byte extent from the chunk's offset and length without reading that offset. Page offsets share the same logical positions as the other page fields. `page_index` is required whenever `PageMetadata` is present. PAGE statistics require `PageMetadata.first_row_index`; omit `PageMetadata` when both streams are absent.
 
-Optional row-group metadata retains row counts in `RowGroupMetadata.num_rows`. Its optional `RowGroupMetadata.offsets` stream holds `G + 1` absolute byte boundaries only when complete row groups occupy contiguous intervals in row-group order. Interleaved layouts or dictionaries shared across row groups can omit this byte-range hint; chunk and dictionary locations remain sufficient.
+Optional row-group metadata stores row counts in `RowGroupMetadata.num_rows`. Its optional `RowGroupMetadata.offsets` stream holds `G + 1` absolute byte boundaries only when complete row groups occupy contiguous intervals in row-group order. Interleaved layouts or dictionaries shared across row groups can omit this byte-range hint; chunk and dictionary locations remain sufficient.
 
 ## Statistics reuse the hierarchy
 
@@ -107,7 +107,7 @@ enum RowRangeKind {
 | `PAGE` | `P` | `column_chunk_index` and `page_index` | Shared `PageMetadata.first_row_index` |
 | `ARBITRARY` | `S` | Separate `column_range_starts` | Set-specific `range_start_rows` |
 
-Only `ARBITRARY` stores the additional index and row starts. `column_range_starts` has `C + 1` non-null `i64` entries; equal adjacent entries mean a column has no ranges in that set. Chunk statistics require `ColumnChunkMetadata.first_row_index`, so reading them does not require page metadata. Page statistics require page-row metadata but do not require page offsets.
+Only `ARBITRARY` stores the additional index and row starts. `column_range_starts` has `C + 1` non-null `INT64` entries; equal adjacent entries mean a column has no ranges in that set. Chunk statistics require `ColumnChunkMetadata.first_row_index`, so reading them does not require page metadata. Page statistics require page-row metadata but do not require page offsets.
 
 For the positional tags, missing statistics retain their positions as unknown values. A column with unavailable or independently encrypted statistics must not shift another column's positions. An entire unavailable leaf stream can be omitted. Scalar flags and distinct counts have one nullable value per range. Typed min/max streams contain paired values `[min_0, max_0, min_1, max_1, ...]`, with `2S` positions; exactness flags use the same pairing. A range's entries in other physical-type streams are null.
 
@@ -140,31 +140,31 @@ These formulas identify logical positions after the necessary index values have 
 
 ## Framing, protection, and compatibility
 
-The proposed plaintext tail is `[metadata streams][Compact-Thrift directory][u64 LE absolute directory offset][PAR3]`, following the source data. This is a new footer format, not a backward-compatible extension readable by PAR1-only readers. The complete IDL defines the root fields and optional row-group, key/value, and encryption structures.
+The tail is `[metadata streams][Compact-Thrift directory][optional 28-byte signature][u32 LE directory length][PAR3]`, following the source data. The length covers the serialized directory and its signature, when present, and excludes the 8-byte trailer. Readers locate the directory at `file_size - 8 - directory_length`, validating bounds before subtraction. Readers must support this footer format; PAR1-only readers cannot read it. The complete IDL defines the root fields and optional row-group, key/value, and encryption structures.
 
 Protected modes authenticate the visible directory and independently protect shared streams with the footer key. Separate column-key modules protect a column's statistics. Authenticate indexes and row metadata before interpreting dependent statistics. Missing statistics or a missing column key means unknown information; failed authentication is an error. The exact envelope and AAD rules are in the IDL; public module identifiers and interoperability validation remain to be completed.
 
 Readers validate index lengths, monotonicity, terminal counts, data/dictionary extents, dictionary ID bounds and ownership, and the positional invariants before use. Dictionary references must belong to one physical column and use compatible decoding. Check offset/length sums without integer overflow. Unsupported required format versions or encodings cannot be guessed. Unknown optional fields can be skipped; an unknown statistics tag makes that set unsupported, not equivalent to another tag.
 
-Compared with the current modular footer, the proposed statistics schema uses null/NaN presence and all-null flags instead of exact null/NaN counts, and does not yet carry `SchemaModule.column_orders` or an equivalent of the optional `SchemaIndexModule`. Its single nullable dictionary ID also narrows the current placement schema's ability to list multiple dictionaries per chunk. These are compatibility decisions to resolve before adoption. The draft is not a lossless replacement for every current modular or PAR1 metadata field; histograms are also outside its present scope.
+Compared with the current modular footer, the proposed statistics schema uses null/NaN presence and all-null flags instead of exact null/NaN counts, and does not carry `SchemaModule.column_orders` or an equivalent of the optional `SchemaIndexModule`. Its single nullable dictionary ID also narrows the current placement schema's ability to list multiple dictionaries per chunk. These are compatibility decisions to resolve before adoption. Histograms are also outside the proposal; these omissions prevent lossless conversion of every modular or PAR1 metadata field.
 
-The public encoding profile, format version, and protection identifiers require agreement. Repository-local experimental encodings and version numbers are not public allocations.
+The public encoding profile, format version, and protection identifiers require allocation before interoperable implementation.
 
 ## Optional future extension: column sets
 
 For exceptionally wide files, such as 30,000 physical columns, location metadata alone may be large even when a query needs only a few columns. Optional column sets would partition metadata into groups of complete columns, allowing a reader to fetch and interpret the selected groups' location streams. This grouping would not constrain where source data is placed.
 
-The [column-set draft](proposal/ColumnSetFooter.thrift) lists each set's physical `column_ordinals`, allowing noncontiguous groups in any order. The list length gives the local column count, so neither `first_column` nor `num_columns` is stored. Every physical column occurs in exactly one set, including columns with no chunks; the total count is checked against the shared source schema. Each set reuses the current base types with local cumulative-end chunk/page indexes and dictionary IDs. Since dictionaries are reused only within a column, keeping complete columns together avoids cross-set dictionary references or duplication. Chunk/page statistics reuse the set's indexes and row starts; arbitrary ranges retain their own boundaries.
+The [column-set definition](proposal/ColumnSetFooter.thrift) lists each set's physical `column_ordinals`, allowing noncontiguous groups in any order. The list length gives the local column count. Every physical column occurs in exactly one set, including columns with no chunks; the total count is checked against the shared source schema. Each set reuses the base types with local cumulative-end chunk/page indexes and dictionary IDs. Since dictionaries are reused only within a column, keeping complete columns together avoids cross-set dictionary references or duplication. Chunk/page statistics reuse the set's indexes and row starts; arbitrary ranges retain their own boundaries.
 
-A column set is a logical grouping. Every stream would retain its own offset, length, and codec, with no requirement for a set's metadata to be contiguous. Readers could fetch location streams first and statistics leaves later. Decoding a leaf's values is independent of sibling leaves; interpreting its positions still requires the shared indexes and applicable row metadata.
+A column set is a logical grouping. Every stream has its own offset, length, and codec, with no requirement for a set's metadata to be contiguous. Readers could fetch location streams first and statistics leaves later. Decoding a leaf's values is independent of sibling leaves; interpreting its positions still requires the shared indexes and applicable row metadata.
 
-Smaller sets reduce metadata fetched for narrow projections but add descriptors and may weaken encoding. This optional draft uses explicit membership lists and independently located streams; group size and protection rules remain open. It is a future extension outside the base format. The revised column-set directory has not been benchmarked; historical contiguous-set experiments use different definitions.
+Smaller sets reduce metadata fetched for narrow projections but add descriptors and may weaken encoding. The extension uses explicit membership lists and independently located streams. Set size is a writer choice; protection rules require specification. Column sets are outside the base format and the measurements below.
 
 ## Size and decoding comparison
 
-V38 is compared with the existing Parquet Compact-Thrift footer (current) and the modular footer on the same inputs. Size and decoding measurements cover all 12 datasets, with all three formats interleaved in each timing run. Metadata is encoded without Zstd. V38 uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.
+The benchmark compares the proposed stream representation with the existing Parquet Compact-Thrift footer and the modular footer on the same 12 datasets. All three implementations are interleaved in each timing run. Metadata is encoded without Zstd. The benchmark implementation uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.
 
-These results use the [V38 benchmark definition](ExplicitIndexFooter.thrift), before the review draft split out `DictionaryMetadata` and moved page offsets into `PageMetadata`. The reorganized directory requires a new wire version; its sizes and decoding timings have not been remeasured.
+Benchmark scope: the tables use the [benchmark directory schema](ExplicitIndexFooter.thrift). They measure the stream representation, but do not establish exact sizes or decoding times for the proposed directory serialization. Encryption and column sets are not measured.
 
 ### Size
 
@@ -172,7 +172,7 @@ All values are bytes of complete metadata at each cumulative scope, including sc
 
 #### Core
 
-| Dataset | Current Parquet Thrift | Modular footer | V38 |
+| Dataset | Current Parquet Thrift | Modular footer | Benchmark implementation |
 |---|---:|---:|---:|
 | US Accidents | 3,963 | 1,937 | 2,099 |
 | FineWeb | 6,209 | 1,966 | 2,359 |
@@ -190,7 +190,7 @@ All values are bytes of complete metadata at each cumulative scope, including sc
 
 #### Core + chunk statistics
 
-| Dataset | Current Parquet Thrift | Modular footer | V38 |
+| Dataset | Current Parquet Thrift | Modular footer | Benchmark implementation |
 |---|---:|---:|---:|
 | US Accidents | 6,030 | 4,846 | 3,714 |
 | FineWeb | 23,553 | 17,878 | 17,690 |
@@ -208,7 +208,7 @@ All values are bytes of complete metadata at each cumulative scope, including sc
 
 #### Core + chunk statistics + page locations
 
-| Dataset | Current Parquet Thrift | Modular footer | V38 |
+| Dataset | Current Parquet Thrift | Modular footer | Benchmark implementation |
 |---|---:|---:|---:|
 | US Accidents | 41,612 | 25,854 | 14,453 |
 | FineWeb | 76,446 | 49,437 | 32,203 |
@@ -226,7 +226,7 @@ All values are bytes of complete metadata at each cumulative scope, including sc
 
 #### Core + chunk statistics + page locations + page statistics
 
-| Dataset | Current Parquet Thrift | Modular footer | V38 |
+| Dataset | Current Parquet Thrift | Modular footer | Benchmark implementation |
 |---|---:|---:|---:|
 | US Accidents | 101,244 | 79,147 | 48,251 |
 | FineWeb | 145,670 | 112,171 | 84,197 |
@@ -242,7 +242,7 @@ All values are bytes of complete metadata at each cumulative scope, including sc
 | Kepler Time Series | 554,166 | 530,149 | 111,111 |
 | **Total** | **33,553,696** | **25,272,629** | **12,235,313** |
 
-Across all 12 datasets, core metadata totals **1,846,119 bytes** for current Thrift, **588,635** for modular, and **468,958** for V38: reductions of 74.6% and 20.3%, respectively. Small core footers can still be larger than modular. For the eight datasets with V35 measurements, omitting the initial zeros changes the core total by only +1 byte; encoding headers and first-value encoding can offset the removed values.
+Across all 12 datasets, core metadata totals **1,846,119 bytes** for current Thrift, **588,635** for modular, and **468,958** for the benchmark implementation: reductions of 74.6% and 20.3%, respectively. Small core footers can be larger than modular.
 
 FineWeb has no page statistics for one column. Its page-statistics set uses the supported ARBITRARY form to preserve that sparse coverage; complete chunk/page sets reuse the shared indexes.
 
@@ -252,7 +252,7 @@ Microseconds per query; lower is better. Each cell is **one column / all columns
 
 #### Chunk metadata
 
-| Dataset | Current Parquet Thrift | Modular footer | V38 |
+| Dataset | Current Parquet Thrift | Modular footer | Benchmark implementation |
 |---|---:|---:|---:|
 | US Accidents | 90.53 / 100.89 | 18.84 / 23.29 | 5.26 / 17.67 |
 | FineWeb | 61.47 / 81.19 | 5.78 / 14.03 | 6.39 / 15.13 |
@@ -269,7 +269,7 @@ Microseconds per query; lower is better. Each cell is **one column / all columns
 
 #### Chunk statistics
 
-| Dataset | Current Parquet Thrift | Modular footer | V38 |
+| Dataset | Current Parquet Thrift | Modular footer | Benchmark implementation |
 |---|---:|---:|---:|
 | US Accidents | 96.18 / 125.64 | 19.47 / 36.85 | 7.00 / 21.48 |
 | FineWeb | 83.57 / 159.58 | 9.14 / 47.27 | 11.83 / 39.07 |
@@ -286,7 +286,7 @@ Microseconds per query; lower is better. Each cell is **one column / all columns
 
 #### Chunk metadata + page locations
 
-| Dataset | Current Parquet Thrift | Modular footer | V38 |
+| Dataset | Current Parquet Thrift | Modular footer | Benchmark implementation |
 |---|---:|---:|---:|
 | US Accidents | 100.92 / 302.51 | 21.76 / 150.27 | 14.10 / 107.53 |
 | FineWeb | 92.38 / 378.13 | 11.64 / 194.50 | 17.70 / 104.58 |
@@ -303,7 +303,7 @@ Microseconds per query; lower is better. Each cell is **one column / all columns
 
 #### Chunk + page statistics
 
-| Dataset | Current Parquet Thrift | Modular footer | V38 |
+| Dataset | Current Parquet Thrift | Modular footer | Benchmark implementation |
 |---|---:|---:|---:|
 | US Accidents | 110.62 / 792.29 | 31.11 / 609.93 | 33.43 / 333.62 |
 | FineWeb | 120.85 / 588.24 | 27.37 / 357.35 | 37.21 / 211.66 |
@@ -318,9 +318,9 @@ Microseconds per query; lower is better. Each cell is **one column / all columns
 | BI-Wins | 3,984.63 / 28,851.80 | 369.53 / 15,846.70 | 176.53 / 6,599.38 |
 | Kepler Time Series | 5,983.62 / 14,082.70 | 988.72 / 4,544.56 | 93.94 / 1,720.51 |
 
-V38 takes less decoding time than current Parquet Thrift in **96/96** measured cases and less than modular in **77/96**. Each case is one dataset, query, and projection; these prototype results do not establish a universal decoding advantage.
+The benchmark implementation takes less decoding time than current Parquet Thrift in **96/96** measured cases and less than modular in **77/96**. Each case is one dataset, query, and projection; performance depends on the workload and reader implementation.
 
-This rerun optimizes the V38 reader on unchanged footer bytes: core scalar callbacks avoid copying value wrappers, full core reads reuse a decoded dictionary-offset table, and range reads visit only overlapping metadata pages and skip redundant bulk rank scans. The dictionary cache adds 8 bytes per dictionary entry for full core reads. The schema, stored encodings, and sizes are unchanged.
+The benchmark reader caches dictionary offsets for full core reads, using 8 bytes per dictionary entry. Range reads visit only overlapping metadata pages.
 
 ### Cases more than 10% slower than modular
 
@@ -333,12 +333,12 @@ Percentages compare decoding time using unrounded medians.
 | Chunk metadata + page locations | FineWeb +52.0%; Household Power +31.6%; AMPds +20.3%; NYC Taxi +11.8% | None |
 | Chunk + page statistics | FineWeb +35.9%; Household Power +19.2%; UCI Adult +15.7%; AMPds +12.2% | ClickBench +10.2% |
 
-Queries use fresh prototype readers over memory-resident bytes, including parsing, decoding, allocation, constructing projected values, and checksumming; file I/O is excluded. One-column results are medians across nine column positions and read every chunk/page needed for that column. Each format ran seven trials in each of three processes per dataset, pinned to CPU 16 on an Intel Xeon Platinum 8375C. All timings were rerun with the optimized reader; the eight-dataset and four-dataset suites use the same executable and protocol. Queried fields can be a subset of the retained metadata. Comparisons cover placement and supported pruning information, rather than exact null-count queries.
+Queries construct fresh readers over memory-resident bytes and include parsing, decoding, allocation, projected values, and checksumming; file I/O is excluded. One-column results are medians across nine column positions and read every chunk/page needed for that column. Each format runs seven trials in each of three processes per dataset, pinned to CPU 16 on an Intel Xeon Platinum 8375C, using the same executable and protocol across all datasets. Queried fields can be a subset of the retained metadata. Comparisons cover placement and supported pruning information; exact null-count queries are excluded.
 
-See the [full measurements and validation](V38-MEASUREMENTS.md), [comparison CSV](proposal-comparison.csv), and [saved samples and provenance](v38-results.json.gz). Sizes and timings here both measure V38; they do not reuse V31 timings.
+See the [measurement details and validation](V38-MEASUREMENTS.md), [comparison CSV](proposal-comparison.csv), and [samples and provenance](v38-results.json.gz).
 
-The preferred benchmark configuration now uses ordinary-frame PFOR for relative page offsets and retains adaptive encoding for the hierarchy indexes. In the [encoding-only follow-up](V38-PFOR.md), this reduces selective decoding time for chunk metadata plus page locations by 4.0% relative to size-minimized V38. Retained metadata at that scope totals 3,826,102 bytes versus modular's 8,830,452 bytes (56.7% smaller); full metadata totals 12,321,007 versus 25,272,629 bytes (51.2% smaller). Both scopes remain smaller than modular on all 12 datasets. The modest size increase over V38 is accepted for the measured speed benefit. The tables above retain the original V38 configuration; the follow-up reports the preferred variant separately. This is an implementation choice, not a required public PFOR encoding.
+The tables use size-minimizing encoding. The recommended [encoding policy](V38-PFOR.md) uses ordinary-frame PFOR for relative page offsets and adaptive encoding for hierarchy indexes. Matched measurements show 4.0% lower selective decoding time for chunk metadata plus page locations than size-minimizing encoding. Metadata at that scope totals 3,826,102 bytes versus modular's 8,830,452 bytes (56.7% smaller); full metadata totals 12,321,007 versus 25,272,629 bytes (51.2% smaller). Both scopes are smaller than modular on all 12 datasets. Encoding policy is a writer choice; the schema does not mandate PFOR.
 
 ## Supporting material
 
-The [full IDL](proposal/ModularFooterV2.thrift) defines each field's type, value count, nullability, and dependencies; the [column-set extension](proposal/ColumnSetFooter.thrift) reuses those types. [V38 measurements](V38-MEASUREMENTS.md) compare the preceding benchmark definition with current Parquet Thrift and the modular footer. Historical [V35 direct-offset results](DIRECT-OFFSETS.md) and [V31 explicit-index](legacy/ExplicitIndexFooterV31.thrift)/[V32 nested-layout](ImplicitLevelsFooter.thrift) experiments describe earlier revisions. Production encryption and a public interoperability suite remain outside the validated scope.
+The [full IDL](proposal/ModularFooterV2.thrift) defines each field's type, value count, nullability, and dependencies. The optional [column-set extension](proposal/ColumnSetFooter.thrift) reuses those types. [Benchmark details](V38-MEASUREMENTS.md) document the inputs, methodology, validation, and reproducibility requirements. Encryption and public interoperability are outside the benchmark validation scope.

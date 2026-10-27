@@ -269,8 +269,11 @@ struct FileInfo {
 /** Visible stream directory, including column-key descriptors.
  * Layout: [source data][metadata streams and column-statistics blocks]
  * [Compact-Thrift root][28-byte signature if crypto_metadata is present]
- * [u64 LE absolute root offset][PAR3]. Streams/blocks precede the root and
- * must not overlap. See the PME section for authentication and AAD rules.
+ * [u32 LE directory length][PAR3]. Length includes the root and optional
+ * signature, excluding the 8-byte trailer. The root starts at
+ * file_size - 8 - directory_length; validate bounds before subtraction.
+ * Streams/blocks precede the root and must not overlap.
+ * See the PME section for authentication and AAD rules.
  */
 struct ModularFooterV2 {
   1: required i32 version; // Allocation pending.
