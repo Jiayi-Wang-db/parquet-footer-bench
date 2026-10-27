@@ -1,5 +1,7 @@
 # V38 ordinary-frame PFOR experiment
 
+**Preferred benchmark configuration: `offsets_frame`.** Retain ordinary-frame PFOR for relative page offsets and adaptive encoding for the hierarchy indexes. We accept the modest size increase over size-minimized V38 because it buys selective-read speed while remaining smaller than modular on every tested dataset at the page-location and full-metadata scopes. This is a benchmark encoding policy; the proposed format does not mandate PFOR.
+
 Forcing frame PFOR on relative page offsets changes geometric-mean decoding time for chunk metadata plus page locations by **-4.0% for one column** and **-1.1% for all columns**. Retained metadata through page locations grows **+2.3%**. Negative timing changes mean less time. The tables separate index changes from page-offset changes.
 
 Encoding-only controls on all 12 saved V38 datasets. No Zstd. The baseline is remeasured in the same executable and timing processes as the controls; historical proposal timings are not used as the denominator.
@@ -11,6 +13,28 @@ The V38 reader, bulk/selected access policy, datasets and queries are unchanged.
 An initial run without per-batch warmup produced an apparent 27% ClickBench full-statistics difference, including in the page-offset-only negative control. A diagnostic using identical footer bytes reproduced the roughly 90/120 ms timing modes. The tables below use the subsequent warmup/four-operation-minimum campaign; the relevant initial and identical-artifact samples are preserved in the result archive.
 
 The size tables are cumulative stored metadata. Timing queries read only the named projection: statistics queries do not read relative page offsets. Page-offset-only controls on statistics queries and all scope-0/1 queries are therefore negative controls.
+
+## Preferred configuration versus modular size
+
+Sizes below use the same saved datasets and cumulative metadata scopes as the modular measurements. Timing improvements above compare with the matched V38 baseline, not with modular timings from a different campaign. Core-only sizes are unchanged by page-offset encoding; some small core footers remain larger than modular.
+
+| Dataset | Page-location scope: preferred / modular bytes | Full metadata: preferred / modular bytes |
+|---|---:|---:|
+| AMPds | 3,990 / 5,974 | 9,014 / 14,758 |
+| BI-USCensus | 1,051,776 / 2,581,306 | 1,523,205 / 5,564,773 |
+| BI-Wins | 337,235 / 856,156 | 500,440 / 1,819,241 |
+| ClickBench Hits | 2,257,417 / 4,898,177 | 9,855,685 / 16,887,807 |
+| FineWeb | 34,183 / 49,437 | 86,177 / 112,171 |
+| Hacker News | 8,515 / 10,946 | 123,504 / 132,831 |
+| Kepler | 8,076 / 17,467 | 10,645 / 25,952 |
+| Kepler Time Series | 85,729 / 346,199 | 111,140 / 530,149 |
+| UCI Adult | 1,724 / 2,099 | 2,346 / 3,354 |
+| Household Power | 5,629 / 7,732 | 13,467 / 19,596 |
+| US Accidents | 15,117 / 25,854 | 48,915 / 79,147 |
+| NYC Taxi | 16,711 / 29,105 | 36,469 / 82,850 |
+| **Total** | 3,826,102 / 8,830,452 | 12,321,007 / 25,272,629 |
+
+The selected artifact directory and all 48 hashes are recorded in `preferred.json` in the work directory and `preferred_configuration` in the result archive.
 
 ## Decoding overview
 

@@ -14,6 +14,7 @@ import sys
 HERE = Path(__file__).resolve().parent
 POLICIES = {'baseline': (), 'indexes_frame': ('3.1', '3.2'),
             'offsets_frame': ('4.3',), 'both_frame': ('3.1', '3.2', '4.3')}
+PREFERRED_POLICY = 'offsets_frame'
 SEEDS = (9201, 9202, 9203)
 
 
@@ -140,6 +141,8 @@ def run(a, tag, mode, seed, initial):
 def report(a):
     sizes = json.loads((a.work/'sizes.json').read_text())
     pages = json.loads((a.work/'pages.json').read_text())
+    frozen = json.loads(gzip.decompress((HERE/'v38-results.json.gz').read_bytes()))
+    modular_sizes = {(r['dataset'], r['scope']): r['modular'] for r in frozen['baselines']}
     for row in sizes:
         path = a.work/row['variant']/f"{row['dataset']}.{row['scope']}.raw.par3"
         assert path.stat().st_size == row['bytes'] and digest(path) == row['sha256']
@@ -190,6 +193,8 @@ def report(a):
         baseline = timings[name, scope, 'baseline', workload]
         rows.append(dict(dataset=name, scope=scope, variant=variant, workload=workload,
             bytes=byte_sizes[name, scope, variant], baseline_bytes=byte_sizes[name, scope, 'baseline'],
+            modular_bytes=modular_sizes[name, scope],
+            size_vs_modular_pct=100*(byte_sizes[name, scope, variant]/modular_sizes[name, scope]-1),
             median_us=r['median_ns']/1000, baseline_us=baseline['median_ns']/1000,
             time_change_pct=100*(r['median_ns']/baseline['median_ns']-1),
             size_change_pct=100*(byte_sizes[name, scope, variant]/byte_sizes[name, scope, 'baseline']-1)))
@@ -210,6 +215,11 @@ def report(a):
         commands=[json.loads(p.read_text()) for p in sorted(a.work.glob('*.command.json'))])
     result = dict(sizes=sizes, pages=pages, summary=summary, per_position=positions,
                   runs=[list(r.values()) for r in runs], validation=validation, provenance=provenance)
+    preferred = dict(policy=PREFERRED_POLICY, artifact_directory=str(a.work/PREFERRED_POLICY),
+                     artifacts=[r for r in sizes if r['variant'] == PREFERRED_POLICY])
+    save(a.work/'preferred.json', preferred)
+    result['preferred_configuration'] = preferred
+    result['modular_sizes'] = [dict(dataset=n, scope=s, bytes=b) for (n,s),b in sorted(modular_sizes.items())]
     diagnostic_work = HERE/'work/v38-pfor-frame-20261027'
     diagnostics = [*diagnostic_work.glob('time-release-additional-wide-*.jsonl'),
                    diagnostic_work/'identical-control/time.jsonl']
@@ -232,12 +242,24 @@ def report(a):
     offset_growth = 100*(sum(byte_sizes[n,2,'offsets_frame'] for n in names)/
                         sum(byte_sizes[n,2,'baseline'] for n in names)-1)
     lines = ['# V38 ordinary-frame PFOR experiment', '',
+        '**Preferred benchmark configuration: `offsets_frame`.** Retain ordinary-frame PFOR for relative page offsets and adaptive encoding for the hierarchy indexes. We accept the modest size increase over size-minimized V38 because it buys selective-read speed while remaining smaller than modular on every tested dataset at the page-location and full-metadata scopes. This is a benchmark encoding policy; the proposed format does not mandate PFOR.', '',
         f'Forcing frame PFOR on relative page offsets changes geometric-mean decoding time for chunk metadata plus page locations by **{offset_times[0]:+.1f}% for one column** and **{offset_times[1]:+.1f}% for all columns**. Retained metadata through page locations grows **{offset_growth:+.1f}%**. Negative timing changes mean less time. The tables separate index changes from page-offset changes.', '',
         'Encoding-only controls on all 12 saved V38 datasets. No Zstd. The baseline is remeasured in the same executable and timing processes as the controls; historical proposal timings are not used as the denominator.', '',
         '`indexes_frame` forces ordinary-frame PFOR on `column_chunk_index` and `page_index` when present. `offsets_frame` forces it on relative page offsets (V38 field 4.3). `both_frame` combines them. Every DATA_PAGE_V2 retains its original logical boundaries and value count. PFOR uses the existing 1,024-value blocks; no delta blocks are allowed. A dictionary page is removed if its target stream is converted. All other streams remain byte-identical. Root offsets/lengths are updated.', '',
         'The V38 reader, bulk/selected access policy, datasets and queries are unchanged. Timings include opening/parsing metadata, decoding, materializing outputs and hashing, with resident bytes and fresh readers per operation. Nine distributed single-column positions and an all-column read are measured. Each dataset is measured in three processes, each running seven randomized trials with all four policies interleaved on the same pinned CPU. The two dataset suites run separately, for six timing processes total. Each timed batch follows one untimed warmup and contains at least four operations. Single-column results are medians across positions after taking medians across trials/processes. Small changes may be timing noise.', '',
         'An initial run without per-batch warmup produced an apparent 27% ClickBench full-statistics difference, including in the page-offset-only negative control. A diagnostic using identical footer bytes reproduced the roughly 90/120 ms timing modes. The tables below use the subsequent warmup/four-operation-minimum campaign; the relevant initial and identical-artifact samples are preserved in the result archive.', '',
         'The size tables are cumulative stored metadata. Timing queries read only the named projection: statistics queries do not read relative page offsets. Page-offset-only controls on statistics queries and all scope-0/1 queries are therefore negative controls.', '',
+        '## Preferred configuration versus modular size', '',
+        'Sizes below use the same saved datasets and cumulative metadata scopes as the modular measurements. Timing improvements above compare with the matched V38 baseline, not with modular timings from a different campaign. Core-only sizes are unchanged by page-offset encoding; some small core footers remain larger than modular.', '',
+        '| Dataset | Page-location scope: preferred / modular bytes | Full metadata: preferred / modular bytes |',
+        '|---|---:|---:|']
+    for name in names:
+        cells = [f'{byte_sizes[name,s,PREFERRED_POLICY]:,} / {modular_sizes[name,s]:,}' for s in (2,3)]
+        lines.append(f'| {names_display.get(name,name)} | ' + ' | '.join(cells) + ' |')
+    lines.append('| **Total** | ' + ' | '.join(
+        f'{sum(byte_sizes[n,s,PREFERRED_POLICY] for n in names):,} / {sum(modular_sizes[n,s] for n in names):,}'
+        for s in (2,3)) + ' |')
+    lines += ['', 'The selected artifact directory and all 48 hashes are recorded in `preferred.json` in the work directory and `preferred_configuration` in the result archive.', '',
         '## Decoding overview', '',
         'Geometric mean time change over 12 datasets. Negative means less time. These aggregates are descriptive, not significance tests.', '',
         '| Query | Read | Indexes only | Page offsets only | Both |', '|---|---|---:|---:|---:|']
