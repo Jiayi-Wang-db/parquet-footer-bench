@@ -1,5 +1,4 @@
 /** Modular footer with explicit column -> chunk -> page indexes.
- * Encryption is schema-only.
  *
  * C = physical columns; K_c = chunks in column c; K = sum(K_c).
  * P_k = data pages in chunk k; P = sum(P_k); D = dictionaries; G = row groups.
