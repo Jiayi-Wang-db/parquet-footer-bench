@@ -2,7 +2,7 @@
 
 Fresh comparison of current Parquet Compact Thrift, the modular footer, and V38. V38 stores direct chunk offsets/lengths, a dictionary offset/length table, nullable chunk dictionary IDs, and shared cumulative-end indexes. Both hierarchy indexes omit the fixed leading zero; relative page offsets retain one value per page, including each chunk’s first zero.
 
-All metadata is encoded without Zstd. Size is the complete retained metadata, including schema, directories, page headers, required external indexes, and trailer. Integer and dictionary encodings remain enabled. Sizes cover all 12 parquet-java files described in [EXPERIMENT-RESULTS.md](EXPERIMENT-RESULTS.md#2-java-written-inputs); timings cover the eight files from cohorts B/C.
+All metadata is encoded without Zstd. Size is the complete retained metadata, including schema, directories, page headers, required external indexes, and trailer. Integer and dictionary encodings remain enabled. Sizes and decoding timings cover all 12 parquet-java files described in [EXPERIMENT-RESULTS.md](EXPERIMENT-RESULTS.md#2-java-written-inputs).
 
 ## Core size
 
@@ -104,12 +104,16 @@ FineWeb has no page statistics for one column. Its page-statistics set uses the 
 
 ## Decoding by query
 
-Times are microseconds per query. Each cell is **one column / all columns**. One-column values are the median over nine selected positions, after taking each position’s median across three fresh processes. Every process runs seven shuffled trials per case. All three formats are interleaved on CPU 16 (Intel Xeon Platinum 8375C); input bytes are resident, and each query constructs a new reader.
+Times are microseconds per query. Each cell is **one column / all columns**. One-column values are the median over nine selected positions, after taking each position’s median across three fresh processes. Every process runs seven shuffled trials per case. All three formats are interleaved on CPU 16 (Intel Xeon Platinum 8375C); input bytes are resident, and each query constructs a new reader. The original eight-dataset timings are retained; the four original shards were timed in three additional processes using the unchanged executable and protocol.
 
 ### Chunk metadata
 
-| Dataset | Current µs | Modular µs | V38 µs |
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
 |---|---:|---:|---:|
+| US Accidents | 90.49 / 100.61 | 18.48 / 22.82 | 5.20 / 19.80 |
+| FineWeb | 61.08 / 80.33 | 5.69 / 13.66 | 6.83 / 20.16 |
+| Hacker News | 35.59 / 41.23 | 8.06 / 10.43 | 5.43 / 12.20 |
+| NYC Taxi | 40.49 / 45.10 | 8.96 / 10.95 | 4.56 / 10.97 |
 | UCI Adult | 28.99 / 32.69 | 8.37 / 9.87 | 4.64 / 9.53 |
 | Household Power | 18.91 / 20.68 | 4.69 / 5.54 | 4.28 / 7.25 |
 | Kepler Search | 304.01 / 337.88 | 57.73 / 73.28 | 8.29 / 57.75 |
@@ -121,8 +125,12 @@ Times are microseconds per query. Each cell is **one column / all columns**. One
 
 ### Chunk statistics
 
-| Dataset | Current µs | Modular µs | V38 µs |
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
 |---|---:|---:|---:|
+| US Accidents | 95.98 / 125.66 | 19.14 / 37.07 | 6.94 / 20.83 |
+| FineWeb | 83.49 / 160.16 | 9.14 / 47.94 | 11.68 / 39.30 |
+| Hacker News | 39.85 / 56.47 | 8.76 / 16.83 | 6.67 / 13.10 |
+| NYC Taxi | 42.85 / 54.57 | 9.53 / 16.66 | 5.42 / 11.52 |
 | UCI Adult | 31.19 / 40.49 | 8.94 / 14.19 | 6.02 / 10.29 |
 | Household Power | 20.05 / 25.88 | 5.14 / 8.16 | 5.86 / 8.77 |
 | Kepler Search | 321.52 / 413.07 | 58.33 / 110.11 | 9.47 / 50.17 |
@@ -134,8 +142,12 @@ Times are microseconds per query. Each cell is **one column / all columns**. One
 
 ### Chunk metadata + page locations
 
-| Dataset | Current µs | Modular µs | V38 µs |
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
 |---|---:|---:|---:|
+| US Accidents | 101.04 / 302.55 | 21.40 / 149.66 | 15.07 / 147.97 |
+| FineWeb | 92.64 / 376.67 | 11.59 / 194.05 | 19.68 / 166.32 |
+| Hacker News | 44.18 / 127.26 | 11.15 / 62.68 | 11.46 / 57.31 |
+| NYC Taxi | 53.52 / 258.53 | 16.17 / 148.21 | 20.49 / 162.84 |
 | UCI Adult | 32.11 / 49.99 | 9.04 / 17.45 | 7.72 / 17.71 |
 | Household Power | 26.66 / 81.00 | 9.17 / 44.56 | 13.64 / 52.40 |
 | Kepler Search | 326.06 / 482.14 | 58.23 / 140.57 | 10.47 / 95.06 |
@@ -147,8 +159,12 @@ Times are microseconds per query. Each cell is **one column / all columns**. One
 
 ### Chunk + page statistics
 
-| Dataset | Current µs | Modular µs | V38 µs |
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
 |---|---:|---:|---:|
+| US Accidents | 110.42 / 795.23 | 30.96 / 613.72 | 33.65 / 340.94 |
+| FineWeb | 120.53 / 584.78 | 27.30 / 356.59 | 36.85 / 214.07 |
+| Hacker News | 53.85 / 460.84 | 19.36 / 363.15 | 18.99 / 274.62 |
+| NYC Taxi | 72.51 / 620.85 | 39.53 / 613.07 | 36.50 / 305.11 |
 | UCI Adult | 34.96 / 84.65 | 10.46 / 32.92 | 12.07 / 26.21 |
 | Household Power | 40.57 / 198.84 | 25.98 / 188.28 | 30.93 / 118.46 |
 | Kepler Search | 333.23 / 765.90 | 59.55 / 236.42 | 14.76 / 104.26 |
@@ -158,15 +174,17 @@ Times are microseconds per query. Each cell is **one column / all columns**. One
 | BI-Wins | 4,002.30 / 28,874.80 | 359.79 / 15,954.90 | 177.64 / 6,879.32 |
 | Kepler Time Series | 6,006.29 / 14,106.80 | 972.46 / 4,623.39 | 92.23 / 1,644.44 |
 
+For US Accidents, FineWeb, Hacker News, and NYC Taxi, V38 takes 24–50% less time than modular for all-column chunk/page statistics. Selective reads are mixed; FineWeb’s one-column queries take 20–70% more time across the four projections.
+
 V38 is faster than modular for all four ClickBench one-column projections. All-column results are mixed: chunk metadata takes 79% more time and combined chunk/page statistics 10% more time, while chunk statistics and chunk metadata with page locations are faster. These results do not establish a universal decoding advantage.
 
 ## Scope and validation
 
-Each projection constructs and checksums the same logical output. Chunk metadata includes data start/end, dictionary start, codec, value count, uncompressed size, and dictionary-use flag; the page projection adds byte extents and first-row positions. Statistics projections return row starts, min/max bounds, and pruning flags. Dictionary lengths and row-group byte hints are preserved from the validated V35 artifacts but are not part of the timed output. Exact null counts, encryption, and cold-storage latency are not benchmarked.
+Each projection constructs and checksums the same logical output. Chunk metadata includes data start/end, dictionary start, codec, value count, uncompressed size, and dictionary-use flag; the page projection adds byte extents and first-row positions. Statistics projections return row starts, min/max bounds, and pruning flags. Dictionary lengths and row-group byte hints are stored in the artifacts but are not part of the timed output. Exact null counts, encryption, and cold-storage latency are not benchmarked.
 
 Release and ASan/UBSan each pass **2,508 cross-format queries** against the independent source oracle and **88 fixture checks**. Fixtures cover unequal/empty columns, zero-page chunks, same-column dictionary reuse, absent dictionaries, zero-column files, chunk/page/arbitrary statistics, missing bounds, statistics without page offsets, and malformed indexes/locations/statistics. Output hashes agree across formats. The real corpus uses regular row-group-aligned chunks; ragged layouts are correctness fixtures, not timing workloads.
 
-The four additional size datasets pass another **960 cross-format queries** in both release and ASan/UBSan, using the unchanged native executable. All 16 new V38 artifacts are parsed through the current Thrift definition and checked against source chunk/dictionary extents; retained statistics streams are verified byte-for-byte. They have no new decoding timings.
+The four original shards pass another **960 cross-format queries** in both release and ASan/UBSan, using the unchanged native executable. All 16 additional V38 artifacts are parsed through the current Thrift definition and checked against source chunk/dictionary extents; retained statistics streams are verified byte-for-byte. Each timing process also validates its selected projections against the source oracle before measuring.
 
 These are prototype readers using the existing external codec harness, including repository-local experimental encodings. They are not a production implementation or an interoperable public encoding profile. Selective validation checks the accessed ranges; preparation and full validation check the complete source outputs.
 
@@ -178,4 +196,4 @@ The checked-in writer/orchestrator is [v38_benchmark.py](v38_benchmark.py); nati
 /home/jiayi.wang/raincloud/.venv/bin/python footer-pages/v38_benchmark.py --stage all
 ```
 
-The [CSV](proposal-comparison.csv) contains all 48 dataset/scope combinations for all three formats. Scope 0 is core; 1 adds chunk statistics; 2 adds page locations; 3 adds page statistics. Blank timing cells identify the four datasets measured for size only. The [result archive](v38-results.json.gz) records all trial samples, per-position/process medians, validation results, artifact/source hashes, CPU information, and exact build commands.
+The [CSV](proposal-comparison.csv) contains size and timing values for all 48 dataset/scope combinations and all three formats. Scope 0 is core; 1 adds chunk statistics; 2 adds page locations; 3 adds page statistics. The [result archive](v38-results.json.gz) records all trial samples, per-position/process medians, validation results, artifact/source hashes, CPU information, and exact build commands. Its `runs` arrays combine the two timing campaigns by seed; `provenance.timing_campaigns` identifies the six separate process outputs.

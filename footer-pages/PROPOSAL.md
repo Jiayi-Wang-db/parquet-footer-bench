@@ -162,7 +162,7 @@ Smaller sets reduce metadata fetched for narrow projections but add descriptors 
 
 ## Size and decoding comparison
 
-V38 is compared with the existing Parquet Compact-Thrift footer (current) and the modular footer on the same inputs. Size measurements cover all 12 datasets; decoding timings cover eight datasets, with all three formats interleaved in one executable. Metadata is encoded without Zstd. V38 uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.
+V38 is compared with the existing Parquet Compact-Thrift footer (current) and the modular footer on the same inputs. Size and decoding measurements cover all 12 datasets, with all three formats interleaved in each timing run. Metadata is encoded without Zstd. V38 uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.
 
 ### Size
 
@@ -246,22 +246,81 @@ FineWeb has no page statistics for one column. Its page-statistics set uses the 
 
 ### Decoding time
 
-ClickBench, microseconds per query; lower is better:
+Microseconds per query; lower is better. Each cell is **one column / all columns**. All 12 datasets are shown for each query.
 
-| Query | Columns | Current Parquet Thrift | Modular footer | V38 |
-|---|---|---:|---:|---:|
-| Chunk metadata | one | 3,647.20 | 68.71 | 65.82 |
-| Chunk metadata | all | 5,362.82 | 767.42 | 1,373.65 |
-| Chunk statistics | one | 4,528.19 | 74.61 | 59.75 |
-| Chunk statistics | all | 9,150.52 | 1,467.76 | 841.47 |
-| Chunk metadata + page locations | one | 5,021.06 | 310.79 | 298.26 |
-| Chunk metadata + page locations | all | 45,670.40 | 26,810.80 | 21,339.50 |
-| Chunk + page statistics | one | 5,934.74 | 983.43 | 570.01 |
-| Chunk + page statistics | all | 132,204.00 | 110,325.00 | 121,880.00 |
+#### Chunk metadata
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
+|---|---:|---:|---:|
+| US Accidents | 90.49 / 100.61 | 18.48 / 22.82 | 5.20 / 19.80 |
+| FineWeb | 61.08 / 80.33 | 5.69 / 13.66 | 6.83 / 20.16 |
+| Hacker News | 35.59 / 41.23 | 8.06 / 10.43 | 5.43 / 12.20 |
+| NYC Taxi | 40.49 / 45.10 | 8.96 / 10.95 | 4.56 / 10.97 |
+| UCI Adult | 28.99 / 32.69 | 8.37 / 9.87 | 4.64 / 9.53 |
+| Household Power | 18.91 / 20.68 | 4.69 / 5.54 | 4.28 / 7.25 |
+| Kepler Search | 304.01 / 337.88 | 57.73 / 73.28 | 8.29 / 57.75 |
+| AMPds | 22.59 / 25.04 | 5.71 / 6.89 | 4.52 / 8.34 |
+| ClickBench | 3,647.20 / 5,362.82 | 68.71 / 767.42 | 65.82 / 1,373.65 |
+| BI-USCensus | 5,948.85 / 8,551.72 | 300.17 / 1,441.27 | 56.37 / 2,050.25 |
+| BI-Wins | 3,154.57 / 4,369.26 | 331.13 / 857.37 | 45.26 / 918.10 |
+| Kepler Time Series | 5,524.50 / 6,122.29 | 969.08 / 1,252.68 | 54.45 / 1,000.27 |
+
+#### Chunk statistics
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
+|---|---:|---:|---:|
+| US Accidents | 95.98 / 125.66 | 19.14 / 37.07 | 6.94 / 20.83 |
+| FineWeb | 83.49 / 160.16 | 9.14 / 47.94 | 11.68 / 39.30 |
+| Hacker News | 39.85 / 56.47 | 8.76 / 16.83 | 6.67 / 13.10 |
+| NYC Taxi | 42.85 / 54.57 | 9.53 / 16.66 | 5.42 / 11.52 |
+| UCI Adult | 31.19 / 40.49 | 8.94 / 14.19 | 6.02 / 10.29 |
+| Household Power | 20.05 / 25.88 | 5.14 / 8.16 | 5.86 / 8.77 |
+| Kepler Search | 321.52 / 413.07 | 58.33 / 110.11 | 9.47 / 50.17 |
+| AMPds | 24.09 / 31.38 | 6.28 / 10.41 | 5.11 / 8.05 |
+| ClickBench | 4,528.19 / 9,150.52 | 74.61 / 1,467.76 | 59.75 / 841.47 |
+| BI-USCensus | 7,156.08 / 14,133.80 | 304.20 / 2,450.77 | 75.06 / 1,037.32 |
+| BI-Wins | 3,709.84 / 6,798.86 | 335.35 / 1,389.92 | 45.14 / 603.07 |
+| Kepler Time Series | 5,857.33 / 7,648.12 | 971.57 / 2,109.15 | 76.62 / 778.84 |
+
+#### Chunk metadata + page locations
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
+|---|---:|---:|---:|
+| US Accidents | 101.04 / 302.55 | 21.40 / 149.66 | 15.07 / 147.97 |
+| FineWeb | 92.64 / 376.67 | 11.59 / 194.05 | 19.68 / 166.32 |
+| Hacker News | 44.18 / 127.26 | 11.15 / 62.68 | 11.46 / 57.31 |
+| NYC Taxi | 53.52 / 258.53 | 16.17 / 148.21 | 20.49 / 162.84 |
+| UCI Adult | 32.11 / 49.99 | 9.04 / 17.45 | 7.72 / 17.71 |
+| Household Power | 26.66 / 81.00 | 9.17 / 44.56 | 13.64 / 52.40 |
+| Kepler Search | 326.06 / 482.14 | 58.23 / 140.57 | 10.47 / 95.06 |
+| AMPds | 27.86 / 73.57 | 8.40 / 36.94 | 11.05 / 42.55 |
+| ClickBench | 5,021.06 / 45,670.40 | 310.79 / 26,810.80 | 298.26 / 21,339.50 |
+| BI-USCensus | 7,511.31 / 35,473.40 | 332.08 / 17,188.10 | 110.04 / 12,906.70 |
+| BI-Wins | 3,857.56 / 13,428.50 | 340.94 / 5,904.12 | 74.21 / 4,320.37 |
+| Kepler Time Series | 5,927.22 / 9,074.75 | 968.84 / 2,542.47 | 59.24 / 1,748.64 |
+
+#### Chunk + page statistics
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
+|---|---:|---:|---:|
+| US Accidents | 110.42 / 795.23 | 30.96 / 613.72 | 33.65 / 340.94 |
+| FineWeb | 120.53 / 584.78 | 27.30 / 356.59 | 36.85 / 214.07 |
+| Hacker News | 53.85 / 460.84 | 19.36 / 363.15 | 18.99 / 274.62 |
+| NYC Taxi | 72.51 / 620.85 | 39.53 / 613.07 | 36.50 / 305.11 |
+| UCI Adult | 34.96 / 84.65 | 10.46 / 32.92 | 12.07 / 26.21 |
+| Household Power | 40.57 / 198.84 | 25.98 / 188.28 | 30.93 / 118.46 |
+| Kepler Search | 333.23 / 765.90 | 59.55 / 236.42 | 14.76 / 104.26 |
+| AMPds | 35.94 / 157.91 | 16.04 / 119.98 | 17.80 / 69.20 |
+| ClickBench | 5,934.74 / 132,204.00 | 983.43 / 110,325.00 | 570.01 / 121,880.00 |
+| BI-USCensus | 7,839.25 / 78,071.50 | 398.75 / 49,487.90 | 252.77 / 21,116.10 |
+| BI-Wins | 4,002.30 / 28,874.80 | 359.79 / 15,954.90 | 177.64 / 6,879.32 |
+| Kepler Time Series | 6,006.29 / 14,106.80 | 972.46 / 4,623.39 | 92.23 / 1,644.44 |
+
+For US Accidents, FineWeb, Hacker News, and NYC Taxi, V38 takes 24–50% less time than modular for all-column chunk/page statistics. Selective reads are mixed; FineWeb’s one-column queries take 20–70% more time across the four projections.
 
 V38 is faster than modular for all four ClickBench one-column projections. All-column results are mixed: chunk metadata takes 79% more time and combined chunk/page statistics 10% more time, while chunk statistics and chunk metadata with page locations are faster. These results do not establish a universal decoding advantage.
 
-Queries use fresh prototype readers over memory-resident bytes, including parsing, decoding, allocation, constructing projected values, and checksumming; file I/O is excluded. One-column results are medians across nine column positions and read every chunk/page needed for that column. Each format ran seven trials in each of three processes, pinned to CPU 16 on an Intel Xeon Platinum 8375C. Queried fields can be a subset of the retained metadata. Comparisons cover placement and supported pruning information, rather than exact null-count queries.
+Queries use fresh prototype readers over memory-resident bytes, including parsing, decoding, allocation, constructing projected values, and checksumming; file I/O is excluded. One-column results are medians across nine column positions and read every chunk/page needed for that column. Each format ran seven trials in each of three processes per dataset, pinned to CPU 16 on an Intel Xeon Platinum 8375C. The original eight-dataset timings are retained; the four remaining datasets were timed separately with the same executable and protocol. Queried fields can be a subset of the retained metadata. Comparisons cover placement and supported pruning information, rather than exact null-count queries.
 
 See the [full measurements and validation](V38-MEASUREMENTS.md), [comparison CSV](proposal-comparison.csv), and [saved samples and provenance](v38-results.json.gz). Sizes and timings here both measure V38; they do not reuse V31 timings.
 
