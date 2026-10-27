@@ -12,7 +12,7 @@ This proposal extends the modular footer in five areas:
 - **Shared indexes across metadata fields.** One column-to-chunk prefix index groups all chunk fields, and one chunk-to-page prefix index groups all page fields. Aligned statistics reuse these indexes, with unknown slots preserving positions when statistics are missing.
 - **Typed metadata streams using Parquet encodings.** A small Thrift directory points directly to independently encoded arrays. Existing page encodings and compression can be used for metadata, while the source schema is stored once.
 
-An additional candidate extension is **optional column sets**: partition metadata streams by contiguous ranges of complete columns. The common footer directory contains each set's column range and stream descriptors. Each location or statistics stream can be fetched independently; streams within a set need not be contiguous. The extension has a [separate experiment IDL](ColumnSetFooter.thrift) and is not yet part of the core IDL linked above.
+The base proposal uses shared indexes and streams across the file, with no column-set wrapper or membership array. [Optional column sets](#optional-future-extension-column-sets) could extend this design for exceptionally wide files; their representation is deferred.
 
 The design retains separate access to placement, statistics, and descriptive metadata. Accessing an encoded value can require decoding its containing block or page; the format does not guarantee the original modular proposal's direct positional access to packed values.
 
@@ -132,16 +132,6 @@ The same chunk/page positions address codecs, row positions, and tagged statisti
 
 These formulas identify logical positions after the necessary index values have been decoded. The format does not store a byte-offset directory for every metadata page. A reader can scan page headers, accumulate their value counts, and cache a directory for locating an encoded range. The selected encoding may still require decoding preceding values within a block or decompressing a page. Protected streams must also be authenticated according to their protection unit before use. Explicit indexes therefore remove hierarchy reconstruction, but do not promise constant-time file access.
 
-### Candidate extension: column sets
-
-To make a subset of location metadata independently useful, give each contiguous range of complete columns its own streams. A `ColumnSetMetadata` entry in the common footer directory contains `first_column`, `num_columns`, `DataLayout`, `DataLocation`, chunk/page metadata, and optional statistics descriptors. Each `StreamLocation` supplies an absolute offset, length, and codec. Sets have no enclosing byte extent or embedded payload; streams from different sets and fields may be interleaved. The common source schema is stored once.
-
-Each set carries direct chunk offsets/lengths and a local table of its referenced dictionaries. Dictionary IDs and the two hierarchy indexes are local to the set. Because dictionary reuse is confined to a column and sets contain complete columns, every dictionary and all its references belong to one set. No cross-set lookup or duplication of dictionary entries is needed. A reader fetches the common directory, then the selected set's index and location streams needed by its query. Page offsets remain relative to the chunk start. The writer chooses set boundaries; one set for the whole file is valid. Smaller sets reduce per-stream overfetch but repeat descriptors and can weaken encoding.
-
-Statistics descriptors belong to the same column range and point directly to independent streams. Chunk/page tags reuse the set's indexes and row starts; arbitrary ranges retain their own index and row starts. Missing entries keep their positions, and omitted statistics mean unknown information. A reader can first fetch location streams, then fetch individual statistics leaves when needed. Scalar decoding is independent; interpreting a leaf's positions still requires its shared indexes and, for statistics, row ranges. No statistics payload is required to locate data.
-
-Inlining all set descriptors increases the initial directory size compared with the historical block layout, but removes the intermediate descriptor fetch and lets readers request only the streams they need. Writers may place streams together and readers may coalesce adjacent requests without changing the format. Historical whole-block fetch sizes and timings do not measure this logical-set design. Encryption and integration with optional row-group descriptors remain separate work before incorporating the extension into the complete footer.
-
 ## Alternatives considered
 
 | Alternative | Benefit | Reason for the proposed choice |
@@ -152,7 +142,6 @@ Inlining all set descriptors increases the initial directory size compared with 
 | One RL/DL carrier, other leaves flattened | Avoids repeating hierarchy levels. | Still requires boundary reconstruction and a dependency on the carrier. Two explicit prefixes make that shared dependency easier to use. |
 | Per-column/per-chunk counts | Describes each list's length. | Locating a later list requires a prefix sum. Store the prefixes and derive counts by subtraction. |
 | Omit the first page offset | Saves a redundant zero, including the sole offset in a single-page chunk. | Offset positions would no longer match page-row and statistics positions. Keep one offset per page when the stream exists. |
-| One physical block per column set | Allows fetching all of a set's metadata in one request. | Store the set's descriptors inline and locate each stream independently. Writers can still choose contiguous placement; it is not a format requirement. |
 
 The recommendation is shared explicit prefixes: the reader's addressing rules are simple, all sibling fields reuse them, and selective access avoids reconstructing list structure. Nested lists remain a useful way to explain the logical model.
 
@@ -162,9 +151,19 @@ The proposed plaintext tail is `[metadata streams][Compact-Thrift directory][u64
 
 Protected modes authenticate the visible directory and independently protect shared streams with the footer key. Separate column-key modules protect a column's statistics. Authenticate indexes and row metadata before interpreting dependent statistics. Missing statistics or a missing column key means unknown information; failed authentication is an error. The exact envelope and AAD rules are in the IDL; public module identifiers and interoperability validation remain to be completed.
 
-Readers validate index lengths, monotonicity, terminal counts, data/dictionary extents, dictionary ID bounds and ownership, and the positional invariants before use. Dictionary references must belong to one physical column and use compatible decoding. Check offset/length sums without integer overflow. Unsupported required format versions or encodings cannot be guessed. Unknown optional fields can be skipped; an unknown statistics tag makes that set unsupported, not equivalent to another tag. The local direct-offset draft is V35; the logical column-set draft is V37/CST4. Historical V31 and V33/V34 region-map artifacts, and V36 contiguous-block sets, require their historical schemas and readers.
+Readers validate index lengths, monotonicity, terminal counts, data/dictionary extents, dictionary ID bounds and ownership, and the positional invariants before use. Dictionary references must belong to one physical column and use compatible decoding. Check offset/length sums without integer overflow. Unsupported required format versions or encodings cannot be guessed. Unknown optional fields can be skipped; an unknown statistics tag makes that set unsupported, not equivalent to another tag.
 
 The current statistics schema preserves pruning information through null/NaN presence and all-null flags, but does not preserve exact null/NaN counts, histograms, or column-order descriptors. These are compatibility decisions to resolve before adoption; the draft is not a lossless replacement for every PAR1 metadata field. The public encoding profile, format version, and protection identifiers also require agreement. Repository-local experimental encodings and version numbers are not public allocations.
+
+## Optional future extension: column sets
+
+For exceptionally wide files, such as 30,000 physical columns, location metadata alone may be large even when a query needs only a few columns. Optional column sets would partition metadata into groups of complete columns, allowing a reader to fetch and interpret the selected groups' location streams. This grouping would not constrain where source data is placed.
+
+Each set would reuse the base representation with local chunk/page indexes and dictionary IDs; the source schema would remain shared. Since dictionaries are reused only within a column, keeping complete columns together avoids cross-set dictionary references or duplication. Chunk/page statistics would reuse the set's indexes and row starts; arbitrary ranges would retain their own boundaries.
+
+A column set is a logical grouping. Every stream would retain its own offset, length, and codec, with no requirement for a set's metadata to be contiguous. Readers could fetch location streams first and statistics leaves later. Decoding a leaf's values is independent of sibling leaves; interpreting its positions still requires the shared indexes and applicable row metadata.
+
+Smaller sets reduce metadata fetched for narrow projections but add descriptors and may weaken encoding. Membership encoding (contiguous ranges versus explicit column ordinals), group size, and the extension's directory and protection rules remain open. The [column-set prototype](ColumnSetFooter.thrift) explores contiguous ranges with independently located streams; it is supporting work, not part of the base format or a commitment to that membership representation.
 
 ## Supporting material
 

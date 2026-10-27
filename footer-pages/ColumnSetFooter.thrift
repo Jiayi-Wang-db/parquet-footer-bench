@@ -1,4 +1,6 @@
-/** Logical column-set draft V37; no public wire-version allocation.
+/** Optional future-extension prototype V37; outside the base footer proposal.
+ * Membership encoding remains open; contiguous ranges below are one experiment.
+ * No public wire-version allocation.
  * Every set's stream descriptors are inline in the common footer directory.
  * Each stream is independently located; sets impose no byte-contiguity rule.
  * Reuses the explicit-index proposal's fields and encodings. Row-group
