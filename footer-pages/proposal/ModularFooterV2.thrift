@@ -131,7 +131,7 @@ struct ColumnChunkMetadata {
    * encrypted statistics. Independent of row groups and num_values; must agree
    * with the chunk's first page row when page-row metadata is present.
    */
-  6: optional StreamLocation first_row_index;
+  6: optional StreamLocation first_row_indexes;
 
   /** INT64; number of values = K; nullability: non-null.
    * Absolute offsets of contiguous data pages, including headers, excluding
@@ -141,11 +141,11 @@ struct ColumnChunkMetadata {
 
   /** INT64; number of values = K; nullability: non-null.
    * Stored data-page bytes, excluding dictionaries; non-negative, zero iff
-   * no data pages. [offsets[k], offsets[k]+compressed_size[k]) extents are
+   * no data pages. [offsets[k], offsets[k]+compressed_sizes[k]) extents are
    * disjoint when nonempty. Check file bounds and overflow; never infer size
    * from another chunk or dictionary.
    */
-  8: required StreamLocation compressed_size;
+  8: required StreamLocation compressed_sizes;
 }
 
 /** Independently optional streams sharing DataLayout.page_index; omit if both absent. */
@@ -154,15 +154,15 @@ struct PageMetadata {
    * Absolute first rows; required for any PAGE statistics, including encrypted
    * statistics. If absent, obtain row positions from source-data pages.
    */
-  1: optional StreamLocation first_row_index;
+  1: optional StreamLocation first_row_indexes;
 
   /** INT64; number of values = P; nullability: non-null.
    * Relative to ColumnChunkMetadata.offsets[k]. Start at 0 in each nonempty
-   * chunk and strictly increase below compressed_size[k]; last page ends at
+   * chunk and strictly increase below compressed_sizes[k]; last page ends at
    * the chunk end. Retain the first zero, including for single-page chunks.
    * If absent, scan source page headers to locate interior pages.
    */
-  2: optional StreamLocation relative_offset;
+  2: optional StreamLocation relative_offsets;
 }
 
 /** Source of a statistics set's row ranges. */
@@ -219,8 +219,8 @@ struct RangeStatistics {
   12: optional StreamLocation min_max_is_exact;
 
   /** Writers emit the tag; absent means ARBITRARY. Unknown tags are unsupported.
-   * COLUMN_CHUNK: one range per chunk; requires ColumnChunkMetadata.first_row_index.
-   * PAGE: one range per page; requires PageMetadata.first_row_index and both
+   * COLUMN_CHUNK: one range per chunk; requires ColumnChunkMetadata.first_row_indexes.
+   * PAGE: one range per page; requires PageMetadata.first_row_indexes and both
    * DataLayout indexes. Each participating chunk must have at least one page.
    * ARBITRARY: explicit range_start_rows; used when positional coverage is unsuitable.
    *

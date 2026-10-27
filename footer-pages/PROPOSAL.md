@@ -66,26 +66,26 @@ Example: two columns with two and one chunks, containing five pages in total:
 column_chunk_index:    [2, 3]
 page_index:            [2, 3, 5]
 offsets:               [1000, 1400, 2000]
-compressed_size:       [200, 100, 300]
+compressed_sizes:       [200, 100, 300]
 dictionary_ids:        [0, 0, null]
 dictionary_metadata.offsets: [800]
 dictionary_metadata.lengths: [100]
-relative_offset:       [0, 100, 0, 0, 200]
-column_chunk_metadata.first_row_index: [0, 100, 0]
-page_metadata.first_row_index: [0, 50, 100, 0, 80]
+relative_offsets:       [0, 100, 0, 0, 200]
+column_chunk_metadata.first_row_indexes: [0, 100, 0]
+page_metadata.first_row_indexes: [0, 50, 100, 0, 80]
 ```
 
 The equivalent logical page-offset grouping is `[[[0, 100], [0]], [[0, 200]]]`. The two shared indexes define this grouping for every page field.
 
 ## Byte locations
 
-`ColumnChunkMetadata.offsets` and `compressed_size` are non-null `INT64` streams with `K` values each. Chunk `k` occupies `[offsets[k], offsets[k] + compressed_size[k])`, containing its contiguous complete data pages, including headers and excluding dictionary bytes. Offsets are absolute and lengths are explicit. Chunks may appear anywhere in the file, independently of column or row-group order.
+`ColumnChunkMetadata.offsets` and `compressed_sizes` are non-null `INT64` streams with `K` values each. Chunk `k` occupies `[offsets[k], offsets[k] + compressed_sizes[k])`, containing its contiguous complete data pages, including headers and excluding dictionary bytes. Offsets are absolute and lengths are explicit. Chunks may appear anywhere in the file, independently of column or row-group order.
 
 `DictionaryMetadata.offsets` and `DictionaryMetadata.lengths` form a table with `D` non-null `INT64` values in each stream. Entry `d` locates one complete dictionary page, including its header. `ColumnChunkMetadata.dictionary_ids` has `K` nullable `INT32` values: null means no dictionary; otherwise the ID is in `[0,D)`. Several chunks of the same physical column may reference one entry, provided their dictionary decoding is compatible. Cross-column dictionary sharing is not permitted. Table entries are stored once and need not follow file order; first-reference order is recommended. With no dictionaries, both table streams are empty and all chunk IDs are null.
 
-`PageMetadata.relative_offset` contains one non-null `INT64` per page, relative to its chunk's `offsets[k]`. The first offset of each nonempty chunk is zero. A page ends at the next page offset in that chunk, or at `offsets[k] + compressed_size[k]` for the last page.
+`PageMetadata.relative_offsets` contains one non-null `INT64` per page, relative to its chunk's `offsets[k]`. The first offset of each nonempty chunk is zero. A page ends at the next page offset in that chunk, or at `offsets[k] + compressed_sizes[k]` for the last page.
 
-The page-offset and page-row streams are independently optional. Each present stream has exactly `P` positions; the offset stream includes the zero for a single-page chunk. A reader that knows a chunk has one page can derive its byte extent from the chunk's offset and length without reading that offset. Page offsets share the same logical positions as the other page fields. `page_index` is required whenever `PageMetadata` is present. PAGE statistics require `PageMetadata.first_row_index`; omit `PageMetadata` when both streams are absent.
+The page-offset and page-row streams are independently optional. Each present stream has exactly `P` positions; the offset stream includes the zero for a single-page chunk. A reader that knows a chunk has one page can derive its byte extent from the chunk's offset and length without reading that offset. Page offsets share the same logical positions as the other page fields. `page_index` is required whenever `PageMetadata` is present. PAGE statistics require `PageMetadata.first_row_indexes`; omit `PageMetadata` when both streams are absent.
 
 Optional row-group metadata stores row counts in `RowGroupMetadata.num_rows`. Its optional `RowGroupMetadata.offsets` stream holds `G + 1` absolute byte boundaries only when complete row groups occupy contiguous intervals in row-group order. Interleaved layouts or dictionaries shared across row groups can omit this byte-range hint; chunk and dictionary locations remain sufficient.
 
@@ -103,11 +103,11 @@ enum RowRangeKind {
 
 | Tag | Number of range positions | Column ownership | Row starts |
 |---|---|---|---|
-| `COLUMN_CHUNK` | `K` | `column_chunk_index` | Shared `ColumnChunkMetadata.first_row_index` |
-| `PAGE` | `P` | `column_chunk_index` and `page_index` | Shared `PageMetadata.first_row_index` |
+| `COLUMN_CHUNK` | `K` | `column_chunk_index` | Shared `ColumnChunkMetadata.first_row_indexes` |
+| `PAGE` | `P` | `column_chunk_index` and `page_index` | Shared `PageMetadata.first_row_indexes` |
 | `ARBITRARY` | `S` | Separate `column_range_starts` | Set-specific `range_start_rows` |
 
-Only `ARBITRARY` stores the additional index and row starts. `column_range_starts` has `C + 1` non-null `INT64` entries; equal adjacent entries mean a column has no ranges in that set. Chunk statistics require `ColumnChunkMetadata.first_row_index`, so reading them does not require page metadata. Page statistics require page-row metadata but do not require page offsets.
+Only `ARBITRARY` stores the additional index and row starts. `column_range_starts` has `C + 1` non-null `INT64` entries; equal adjacent entries mean a column has no ranges in that set. Chunk statistics require `ColumnChunkMetadata.first_row_indexes`, so reading them does not require page metadata. Page statistics require page-row metadata but do not require page offsets.
 
 For the positional tags, missing statistics retain their positions as unknown values. A column with unavailable or independently encrypted statistics must not shift another column's positions. An entire unavailable leaf stream can be omitted. Scalar flags and distinct counts have one nullable value per range. Typed min/max streams contain paired values `[min_0, max_0, min_1, max_1, ...]`, with `2S` positions; exactness flags use the same pairing. A range's entries in other physical-type streams are null.
 
@@ -126,9 +126,9 @@ a, b = boundary(column_chunk_index, c), column_chunk_index[c]
 k = a + j                         # require 0 <= j < b - a
 x, y = boundary(page_index, k), page_index[k]
 p = x + q                         # require 0 <= q < y - x
-start = offsets[k] + relative_offset[p]
-end = offsets[k] + relative_offset[p + 1]        if p + 1 < y
-      offsets[k] + compressed_size[k]          otherwise
+start = offsets[k] + relative_offsets[p]
+end = offsets[k] + relative_offsets[p + 1]        if p + 1 < y
+      offsets[k] + compressed_sizes[k]          otherwise
 
 d = dictionary_ids[k]
 dictionary = none if d is null else (dictionary_metadata.offsets[d], dictionary_metadata.lengths[d])
