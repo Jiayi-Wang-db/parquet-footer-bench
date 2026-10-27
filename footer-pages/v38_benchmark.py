@@ -256,11 +256,27 @@ def fixtures(a, direct):
 def build(a):
     for name in ('list_page_readers.h', 'matched_comparison.h', 'statistics_comparison.h', 'dbp.cc'):
         shutil.copyfile(a.support/name, a.work/name)
+    # Range reads visit only overlapping pages. Bulk loads already prepare values,
+    # so they do not need the scalar reader's rank prepass.
+    page_path=a.work/'list_page_readers.h';pages=page_path.read_text()
+    old='''    for(int i=0;i<int(s.directory.size());++i) {
+      auto& p=s.directory[i];int begin=std::max(lo,p.first),end=std::min(hi,p.end());'''
+    new='''    auto first_page=std::lower_bound(s.directory.begin(),s.directory.end(),lo,
+        [](const HeaderInfo& p,int n){return p.end()<=n;});
+    for(int i=first_page-s.directory.begin();i<int(s.directory.size()) && s.directory[i].first<hi;++i) {
+      auto& p=s.directory[i];int begin=std::max(lo,p.first),end=std::min(hi,p.end());'''
+    assert pages.count(old)==1;pages=pages.replace(old,new)
+    old='      for(int j=begin;j<end;j+=stride)if(int rank='
+    assert pages.count(old)==1;pages=pages.replace(old,old.replace('for(', 'if(!bulk)for(', 1))
+    page_path.write_text(pages)
     shutil.copyfile(HERE/'fast_statistics_reader.h', a.work/'fast_statistics_reader.h')
     core = (a.support/'core_base.h').read_text()
     old='(version==23 || (version>=26 && version<=32))'
     assert core.count(old)==1
     core=core.replace(old, 'version==38')
+    # Avoid copying the string-capable Bound wrapper for each core scalar.
+    old='[&](Bound b){sink(i++,b);}'
+    assert core.count(old)==1;core=core.replace(old,'[&](const Bound& b){sink(i++,b);}')
     (a.work/'core_base.h').write_text(core)
     stats=(a.support/'refined_statistics.h').read_text()
     stats=stats.replace('refined::Hierarchy', 'v38::Hierarchy')
@@ -425,22 +441,27 @@ def report(a):
         sparse_note,'',
         '### Decoding time','',
         'Microseconds per query; lower is better. Each cell is **one column / all columns**. All 12 datasets are shown for each query.','']+timing_tables
-    core_slower=100*(timing['clickbench-hits',0,'v38','all']/timing['clickbench-hits',0,'modular','all']-1)
-    stats_slower=100*(timing['clickbench-hits',3,'v38','all']/timing['clickbench-hits',3,'modular','all']-1)
-    speed_summary=(f'V38 is faster than modular for all four ClickBench one-column projections. '
-                   f'All-column results are mixed: chunk metadata takes {core_slower:.0f}% more time and combined chunk/page statistics '
-                   f'{stats_slower:.0f}% more time, while chunk statistics and chunk metadata with page locations are faster. '
-                   'These results do not establish a universal decoding advantage.')
-    initial_names=[r['dataset'] for r in sizes if r['scope']==0 and r['v35_bytes'] is None]
-    savings=[100*(1-timing[name,3,'v38','all']/timing[name,3,'modular','all']) for name in initial_names]
-    fineweb=[100*(timing['fineweb-10bt-000',scope,'v38','one']/timing['fineweb-10bt-000',scope,'modular','one']-1)
-             for scope in queries]
-    initial_summary=(f'For US Accidents, FineWeb, Hacker News, and NYC Taxi, V38 takes {min(savings):.0f}–{max(savings):.0f}% '
-                     f'less time than modular for all-column chunk/page statistics. Selective reads are mixed; '
-                     f'FineWeb’s one-column queries take {min(fineweb):.0f}–{max(fineweb):.0f}% more time across the four projections.')
+    cases=list(itertools.product(names,queries,('one','all')))
+    faster={v:sum(timing[n,s,'v38',w]<timing[n,s,v,w] for n,s,w in cases) for v in ('current','modular')}
+    speed_summary=(f"V38 takes less decoding time than current Parquet Thrift in **{faster['current']}/{len(cases)}** "
+                   f"measured cases and less than modular in **{faster['modular']}/{len(cases)}**. "
+                   'Each case is one dataset, query, and projection; these prototype results do not establish a universal decoding advantage.')
+    regressions=['### Cases more than 10% slower than modular','',
+                 'Percentages compare decoding time using unrounded medians.','',
+                 '| Query | One column | All columns |','|---|---|---|']
+    for scope,title in queries.items():
+        cells=[]
+        for workload in ('one','all'):
+            slower=[(timing[n,scope,'v38',workload]/timing[n,scope,'modular',workload]-1,n) for n in names]
+            cells.append('; '.join(f'{names[n]} +{100*delta:.1f}%' for delta,n in sorted(slower,reverse=True) if delta>0.1) or 'None')
+        regressions.append('| '+title+' | '+' | '.join(cells)+' |')
+    regressions.append('')
+    reader_update=('This rerun optimizes the V38 reader on unchanged footer bytes: core scalar callbacks avoid copying value wrappers, '
+                   'full core reads reuse a decoded dictionary-offset table, and range reads visit only overlapping metadata pages and skip redundant bulk rank scans. '
+                   'The dictionary cache adds 8 bytes per dictionary entry for full core reads. The schema, stored encodings, and sizes are unchanged.')
     section+=[
-        initial_summary,'',speed_summary,'',
-        'Queries use fresh prototype readers over memory-resident bytes, including parsing, decoding, allocation, constructing projected values, and checksumming; file I/O is excluded. One-column results are medians across nine column positions and read every chunk/page needed for that column. Each format ran seven trials in each of three processes per dataset, pinned to CPU 16 on an Intel Xeon Platinum 8375C. The original eight-dataset timings are retained; the four remaining datasets were timed separately with the same executable and protocol. Queried fields can be a subset of the retained metadata. Comparisons cover placement and supported pruning information, rather than exact null-count queries.','',
+        speed_summary,'',reader_update,'']+regressions+[
+        'Queries use fresh prototype readers over memory-resident bytes, including parsing, decoding, allocation, constructing projected values, and checksumming; file I/O is excluded. One-column results are medians across nine column positions and read every chunk/page needed for that column. Each format ran seven trials in each of three processes per dataset, pinned to CPU 16 on an Intel Xeon Platinum 8375C. All timings were rerun with the optimized reader; the eight-dataset and four-dataset suites use the same executable and protocol. Queried fields can be a subset of the retained metadata. Comparisons cover placement and supported pruning information, rather than exact null-count queries.','',
         'See the [full measurements and validation](V38-MEASUREMENTS.md), [comparison CSV](proposal-comparison.csv), and [saved samples and provenance](v38-results.json.gz). Sizes and timings here both measure V38; they do not reuse V31 timings.','']
     proposal=HERE/'PROPOSAL.md';text=proposal.read_text()
     start=text.index('## Size and decoding comparison\n');end=text.index('## Supporting material\n',start)
@@ -468,15 +489,15 @@ The [full IDL](ExplicitIndexFooter.thrift) defines each field's type, value coun
     lines += [line.replace('#### ','### ',1) for line in size_tables]
     lines += [
         '## Decoding by query','',
-        'Times are microseconds per query. Each cell is **one column / all columns**. One-column values are the median over nine selected positions, after taking each position’s median across three fresh processes. Every process runs seven shuffled trials per case. All three formats are interleaved on CPU 16 (Intel Xeon Platinum 8375C); input bytes are resident, and each query constructs a new reader. The original eight-dataset timings are retained; the four original shards were timed in three additional processes using the unchanged executable and protocol.','']
+        'Times are microseconds per query. Each cell is **one column / all columns**. One-column values are the median over nine selected positions, after taking each position’s median across three fresh processes. Every process runs seven shuffled trials per case. All three formats are interleaved on CPU 16 (Intel Xeon Platinum 8375C); input bytes are resident, and each query constructs a new reader. All timings were rerun with the optimized reader, using the same executable for the eight-dataset and four-dataset suites.','']
     lines += [line.replace('#### ','### ',1) for line in timing_tables]
-    lines += [initial_summary,'',speed_summary,'']
+    lines += [speed_summary,'',reader_update,'']+regressions
     wins={(scope,w):sum(timing[name,scope,'v38',w]<timing[name,scope,'modular',w] for name in names)
           for scope in queries for w in ('one','all')}
     lines+=['## Scope and validation','',
         'Each projection constructs and checksums the same logical output. Chunk metadata includes data start/end, dictionary start, codec, value count, uncompressed size, and dictionary-use flag; the page projection adds byte extents and first-row positions. Statistics projections return row starts, min/max bounds, and pruning flags. Dictionary lengths and row-group byte hints are stored in the artifacts but are not part of the timed output. Exact null counts, encryption, and cold-storage latency are not benchmarked.','',
         'Release and ASan/UBSan each pass **2,508 cross-format queries** against the independent source oracle and **88 fixture checks**. Fixtures cover unequal/empty columns, zero-page chunks, same-column dictionary reuse, absent dictionaries, zero-column files, chunk/page/arbitrary statistics, missing bounds, statistics without page offsets, and malformed indexes/locations/statistics. Output hashes agree across formats. The real corpus uses regular row-group-aligned chunks; ragged layouts are correctness fixtures, not timing workloads.','',
-        'The four original shards pass another **960 cross-format queries** in both release and ASan/UBSan, using the unchanged native executable. All 16 additional V38 artifacts are parsed through the current Thrift definition and checked against source chunk/dictionary extents; retained statistics streams are verified byte-for-byte. Each timing process also validates its selected projections against the source oracle before measuring.','',
+        'The four original shards pass another **960 cross-format queries** in both release and ASan/UBSan, using the same optimized executable. All 16 additional V38 artifacts were parsed through the current Thrift definition and checked against source chunk/dictionary extents during preparation; retained statistics streams were verified byte-for-byte. This reader-only rerun verifies the saved hashes of all 48 unchanged artifacts. Each timing process also validates its selected projections against the source oracle before measuring.','',
         'These are prototype readers using the existing external codec harness, including repository-local experimental encodings. They are not a production implementation or an interoperable public encoding profile. Selective validation checks the accessed ranges; preparation and full validation check the complete source outputs.','',
         '## Reproduction','',
         'The checked-in writer/orchestrator is [v38_benchmark.py](v38_benchmark.py); native V38 addressing is in [v38_reader.h](v38_reader.h), and the matched driver/fixtures are in [v38_decode.cc](v38_decode.cc). This run reuses the saved V35 artifacts, frozen `work/refined-hierarchy` reader support/build commands, `work/list-statistics/request.bin`, and the existing external footer/codec harness. It also uses local helpers from earlier experiments, including `tagged_row_ranges.py`, `fast_statistics_reader.h`, and `refined_statistics_rows.h`. Those historical work directories, helper dependencies, and external Runtime codecs are not packaged here; this is a local-harness runner, not a self-contained public benchmark.','',
@@ -494,7 +515,7 @@ def main():
     p.add_argument('--direct',type=Path,default=HERE/'work/direct-explicit-20261026')
     p.add_argument('--support',type=Path,default=HERE/'work/refined-hierarchy')
     p.add_argument('--stats',type=Path,default=HERE/'work/list-statistics')
-    p.add_argument('--work',type=Path,default=HERE/'work/v38-20261027')
+    p.add_argument('--work',type=Path,default=HERE/'work/v38-optimized-20261027')
     p.add_argument('--stage',choices=('prepare','prepare-initial','build','validate','validate-initial','time','time-initial','report','all'),default='all')
     a=p.parse_args()
     for key in ('harness','direct','support','stats','work'):setattr(a,key,getattr(a,key).resolve())

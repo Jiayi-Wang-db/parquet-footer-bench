@@ -104,79 +104,90 @@ FineWeb has no page statistics for one column. Its page-statistics set uses the 
 
 ## Decoding by query
 
-Times are microseconds per query. Each cell is **one column / all columns**. One-column values are the median over nine selected positions, after taking each position’s median across three fresh processes. Every process runs seven shuffled trials per case. All three formats are interleaved on CPU 16 (Intel Xeon Platinum 8375C); input bytes are resident, and each query constructs a new reader. The original eight-dataset timings are retained; the four original shards were timed in three additional processes using the unchanged executable and protocol.
+Times are microseconds per query. Each cell is **one column / all columns**. One-column values are the median over nine selected positions, after taking each position’s median across three fresh processes. Every process runs seven shuffled trials per case. All three formats are interleaved on CPU 16 (Intel Xeon Platinum 8375C); input bytes are resident, and each query constructs a new reader. All timings were rerun with the optimized reader, using the same executable for the eight-dataset and four-dataset suites.
 
 ### Chunk metadata
 
 | Dataset | Current Parquet Thrift | Modular footer | V38 |
 |---|---:|---:|---:|
-| US Accidents | 90.49 / 100.61 | 18.48 / 22.82 | 5.20 / 19.80 |
-| FineWeb | 61.08 / 80.33 | 5.69 / 13.66 | 6.83 / 20.16 |
-| Hacker News | 35.59 / 41.23 | 8.06 / 10.43 | 5.43 / 12.20 |
-| NYC Taxi | 40.49 / 45.10 | 8.96 / 10.95 | 4.56 / 10.97 |
-| UCI Adult | 28.99 / 32.69 | 8.37 / 9.87 | 4.64 / 9.53 |
-| Household Power | 18.91 / 20.68 | 4.69 / 5.54 | 4.28 / 7.25 |
-| Kepler Search | 304.01 / 337.88 | 57.73 / 73.28 | 8.29 / 57.75 |
-| AMPds | 22.59 / 25.04 | 5.71 / 6.89 | 4.52 / 8.34 |
-| ClickBench | 3,647.20 / 5,362.82 | 68.71 / 767.42 | 65.82 / 1,373.65 |
-| BI-USCensus | 5,948.85 / 8,551.72 | 300.17 / 1,441.27 | 56.37 / 2,050.25 |
-| BI-Wins | 3,154.57 / 4,369.26 | 331.13 / 857.37 | 45.26 / 918.10 |
-| Kepler Time Series | 5,524.50 / 6,122.29 | 969.08 / 1,252.68 | 54.45 / 1,000.27 |
+| US Accidents | 90.53 / 100.89 | 18.84 / 23.29 | 5.26 / 17.67 |
+| FineWeb | 61.47 / 81.19 | 5.78 / 14.03 | 6.39 / 15.13 |
+| Hacker News | 35.57 / 41.56 | 8.28 / 10.76 | 5.43 / 10.76 |
+| NYC Taxi | 40.36 / 44.81 | 9.26 / 11.12 | 4.61 / 10.12 |
+| UCI Adult | 28.87 / 32.32 | 8.61 / 10.04 | 4.67 / 8.83 |
+| Household Power | 18.93 / 20.83 | 4.77 / 5.65 | 4.30 / 7.01 |
+| Kepler Search | 305.64 / 336.58 | 58.87 / 75.49 | 8.30 / 50.28 |
+| AMPds | 22.65 / 24.89 | 5.83 / 7.07 | 4.56 / 7.74 |
+| ClickBench | 3,642.97 / 5,421.59 | 70.43 / 790.02 | 62.13 / 877.93 |
+| BI-USCensus | 5,901.06 / 8,581.93 | 307.76 / 1,485.41 | 55.33 / 1,324.76 |
+| BI-Wins | 3,150.92 / 4,292.93 | 339.07 / 884.57 | 44.93 / 612.05 |
+| Kepler Time Series | 5,512.22 / 6,168.77 | 979.92 / 1,291.62 | 54.80 / 885.10 |
 
 ### Chunk statistics
 
 | Dataset | Current Parquet Thrift | Modular footer | V38 |
 |---|---:|---:|---:|
-| US Accidents | 95.98 / 125.66 | 19.14 / 37.07 | 6.94 / 20.83 |
-| FineWeb | 83.49 / 160.16 | 9.14 / 47.94 | 11.68 / 39.30 |
-| Hacker News | 39.85 / 56.47 | 8.76 / 16.83 | 6.67 / 13.10 |
-| NYC Taxi | 42.85 / 54.57 | 9.53 / 16.66 | 5.42 / 11.52 |
-| UCI Adult | 31.19 / 40.49 | 8.94 / 14.19 | 6.02 / 10.29 |
-| Household Power | 20.05 / 25.88 | 5.14 / 8.16 | 5.86 / 8.77 |
-| Kepler Search | 321.52 / 413.07 | 58.33 / 110.11 | 9.47 / 50.17 |
-| AMPds | 24.09 / 31.38 | 6.28 / 10.41 | 5.11 / 8.05 |
-| ClickBench | 4,528.19 / 9,150.52 | 74.61 / 1,467.76 | 59.75 / 841.47 |
-| BI-USCensus | 7,156.08 / 14,133.80 | 304.20 / 2,450.77 | 75.06 / 1,037.32 |
-| BI-Wins | 3,709.84 / 6,798.86 | 335.35 / 1,389.92 | 45.14 / 603.07 |
-| Kepler Time Series | 5,857.33 / 7,648.12 | 971.57 / 2,109.15 | 76.62 / 778.84 |
+| US Accidents | 96.18 / 125.64 | 19.47 / 36.85 | 7.00 / 21.48 |
+| FineWeb | 83.57 / 159.58 | 9.14 / 47.27 | 11.83 / 39.07 |
+| Hacker News | 39.89 / 57.88 | 8.87 / 16.67 | 6.77 / 13.24 |
+| NYC Taxi | 42.93 / 55.35 | 9.72 / 16.37 | 5.51 / 11.77 |
+| UCI Adult | 31.29 / 40.53 | 9.07 / 14.22 | 6.07 / 10.47 |
+| Household Power | 20.13 / 25.74 | 5.21 / 8.20 | 5.88 / 8.80 |
+| Kepler Search | 322.14 / 412.46 | 59.66 / 108.01 | 9.59 / 51.00 |
+| AMPds | 24.24 / 30.92 | 6.36 / 10.32 | 5.15 / 8.31 |
+| ClickBench | 4,450.27 / 8,872.48 | 75.88 / 1,456.34 | 59.22 / 808.72 |
+| BI-USCensus | 7,168.80 / 14,051.50 | 312.89 / 2,433.40 | 75.40 / 987.38 |
+| BI-Wins | 3,701.80 / 6,756.69 | 343.59 / 1,436.93 | 45.15 / 572.35 |
+| Kepler Time Series | 5,853.66 / 7,593.44 | 987.40 / 2,061.62 | 77.36 / 818.22 |
 
 ### Chunk metadata + page locations
 
 | Dataset | Current Parquet Thrift | Modular footer | V38 |
 |---|---:|---:|---:|
-| US Accidents | 101.04 / 302.55 | 21.40 / 149.66 | 15.07 / 147.97 |
-| FineWeb | 92.64 / 376.67 | 11.59 / 194.05 | 19.68 / 166.32 |
-| Hacker News | 44.18 / 127.26 | 11.15 / 62.68 | 11.46 / 57.31 |
-| NYC Taxi | 53.52 / 258.53 | 16.17 / 148.21 | 20.49 / 162.84 |
-| UCI Adult | 32.11 / 49.99 | 9.04 / 17.45 | 7.72 / 17.71 |
-| Household Power | 26.66 / 81.00 | 9.17 / 44.56 | 13.64 / 52.40 |
-| Kepler Search | 326.06 / 482.14 | 58.23 / 140.57 | 10.47 / 95.06 |
-| AMPds | 27.86 / 73.57 | 8.40 / 36.94 | 11.05 / 42.55 |
-| ClickBench | 5,021.06 / 45,670.40 | 310.79 / 26,810.80 | 298.26 / 21,339.50 |
-| BI-USCensus | 7,511.31 / 35,473.40 | 332.08 / 17,188.10 | 110.04 / 12,906.70 |
-| BI-Wins | 3,857.56 / 13,428.50 | 340.94 / 5,904.12 | 74.21 / 4,320.37 |
-| Kepler Time Series | 5,927.22 / 9,074.75 | 968.84 / 2,542.47 | 59.24 / 1,748.64 |
+| US Accidents | 100.92 / 302.51 | 21.76 / 150.27 | 14.10 / 107.53 |
+| FineWeb | 92.38 / 378.13 | 11.64 / 194.50 | 17.70 / 104.58 |
+| Hacker News | 44.20 / 128.13 | 11.32 / 62.75 | 10.50 / 40.43 |
+| NYC Taxi | 53.23 / 253.86 | 16.38 / 147.22 | 18.31 / 117.50 |
+| UCI Adult | 32.15 / 49.26 | 9.31 / 17.76 | 7.70 / 15.90 |
+| Household Power | 26.48 / 80.44 | 9.27 / 44.23 | 12.20 / 39.72 |
+| Kepler Search | 324.58 / 483.21 | 59.43 / 142.40 | 10.47 / 84.18 |
+| AMPds | 27.99 / 73.29 | 8.56 / 37.28 | 10.30 / 32.85 |
+| ClickBench | 5,015.37 / 45,312.30 | 310.69 / 26,561.20 | 221.21 / 13,703.20 |
+| BI-USCensus | 7,518.76 / 35,344.60 | 340.88 / 17,101.40 | 102.36 / 8,527.32 |
+| BI-Wins | 3,843.25 / 13,306.10 | 349.50 / 5,920.63 | 71.43 / 2,947.91 |
+| Kepler Time Series | 5,912.71 / 9,039.31 | 982.01 / 2,583.70 | 59.83 / 1,556.25 |
 
 ### Chunk + page statistics
 
 | Dataset | Current Parquet Thrift | Modular footer | V38 |
 |---|---:|---:|---:|
-| US Accidents | 110.42 / 795.23 | 30.96 / 613.72 | 33.65 / 340.94 |
-| FineWeb | 120.53 / 584.78 | 27.30 / 356.59 | 36.85 / 214.07 |
-| Hacker News | 53.85 / 460.84 | 19.36 / 363.15 | 18.99 / 274.62 |
-| NYC Taxi | 72.51 / 620.85 | 39.53 / 613.07 | 36.50 / 305.11 |
-| UCI Adult | 34.96 / 84.65 | 10.46 / 32.92 | 12.07 / 26.21 |
-| Household Power | 40.57 / 198.84 | 25.98 / 188.28 | 30.93 / 118.46 |
-| Kepler Search | 333.23 / 765.90 | 59.55 / 236.42 | 14.76 / 104.26 |
-| AMPds | 35.94 / 157.91 | 16.04 / 119.98 | 17.80 / 69.20 |
-| ClickBench | 5,934.74 / 132,204.00 | 983.43 / 110,325.00 | 570.01 / 121,880.00 |
-| BI-USCensus | 7,839.25 / 78,071.50 | 398.75 / 49,487.90 | 252.77 / 21,116.10 |
-| BI-Wins | 4,002.30 / 28,874.80 | 359.79 / 15,954.90 | 177.64 / 6,879.32 |
-| Kepler Time Series | 6,006.29 / 14,106.80 | 972.46 / 4,623.39 | 92.23 / 1,644.44 |
+| US Accidents | 110.62 / 792.29 | 31.11 / 609.93 | 33.43 / 333.62 |
+| FineWeb | 120.85 / 588.24 | 27.37 / 357.35 | 37.21 / 211.66 |
+| Hacker News | 54.04 / 463.20 | 19.26 / 362.31 | 18.91 / 271.33 |
+| NYC Taxi | 72.49 / 617.53 | 39.10 / 604.63 | 36.24 / 288.78 |
+| UCI Adult | 35.07 / 83.37 | 10.56 / 32.37 | 12.21 / 26.14 |
+| Household Power | 40.65 / 199.49 | 26.05 / 186.96 | 31.05 / 115.31 |
+| Kepler Search | 332.18 / 764.10 | 60.58 / 232.30 | 14.85 / 106.92 |
+| AMPds | 36.03 / 157.10 | 15.83 / 119.15 | 17.76 / 66.94 |
+| ClickBench | 5,852.40 / 131,028.00 | 979.20 / 109,196.00 | 564.88 / 120,365.00 |
+| BI-USCensus | 7,852.65 / 77,866.60 | 404.21 / 48,788.40 | 252.03 / 19,963.10 |
+| BI-Wins | 3,984.63 / 28,851.80 | 369.53 / 15,846.70 | 176.53 / 6,599.38 |
+| Kepler Time Series | 5,983.62 / 14,082.70 | 988.72 / 4,544.56 | 93.94 / 1,720.51 |
 
-For US Accidents, FineWeb, Hacker News, and NYC Taxi, V38 takes 24–50% less time than modular for all-column chunk/page statistics. Selective reads are mixed; FineWeb’s one-column queries take 20–70% more time across the four projections.
+V38 takes less decoding time than current Parquet Thrift in **96/96** measured cases and less than modular in **77/96**. Each case is one dataset, query, and projection; these prototype results do not establish a universal decoding advantage.
 
-V38 is faster than modular for all four ClickBench one-column projections. All-column results are mixed: chunk metadata takes 79% more time and combined chunk/page statistics 10% more time, while chunk statistics and chunk metadata with page locations are faster. These results do not establish a universal decoding advantage.
+This rerun optimizes the V38 reader on unchanged footer bytes: core scalar callbacks avoid copying value wrappers, full core reads reuse a decoded dictionary-offset table, and range reads visit only overlapping metadata pages and skip redundant bulk rank scans. The dictionary cache adds 8 bytes per dictionary entry for full core reads. The schema, stored encodings, and sizes are unchanged.
+
+### Cases more than 10% slower than modular
+
+Percentages compare decoding time using unrounded medians.
+
+| Query | One column | All columns |
+|---|---|---|
+| Chunk metadata | FineWeb +10.7% | Household Power +24.0%; ClickBench +11.1% |
+| Chunk statistics | FineWeb +29.4%; Household Power +12.7% | None |
+| Chunk metadata + page locations | FineWeb +52.0%; Household Power +31.6%; AMPds +20.3%; NYC Taxi +11.8% | None |
+| Chunk + page statistics | FineWeb +35.9%; Household Power +19.2%; UCI Adult +15.7%; AMPds +12.2% | ClickBench +10.2% |
 
 ## Scope and validation
 
@@ -184,7 +195,7 @@ Each projection constructs and checksums the same logical output. Chunk metadata
 
 Release and ASan/UBSan each pass **2,508 cross-format queries** against the independent source oracle and **88 fixture checks**. Fixtures cover unequal/empty columns, zero-page chunks, same-column dictionary reuse, absent dictionaries, zero-column files, chunk/page/arbitrary statistics, missing bounds, statistics without page offsets, and malformed indexes/locations/statistics. Output hashes agree across formats. The real corpus uses regular row-group-aligned chunks; ragged layouts are correctness fixtures, not timing workloads.
 
-The four original shards pass another **960 cross-format queries** in both release and ASan/UBSan, using the unchanged native executable. All 16 additional V38 artifacts are parsed through the current Thrift definition and checked against source chunk/dictionary extents; retained statistics streams are verified byte-for-byte. Each timing process also validates its selected projections against the source oracle before measuring.
+The four original shards pass another **960 cross-format queries** in both release and ASan/UBSan, using the same optimized executable. All 16 additional V38 artifacts were parsed through the current Thrift definition and checked against source chunk/dictionary extents during preparation; retained statistics streams were verified byte-for-byte. This reader-only rerun verifies the saved hashes of all 48 unchanged artifacts. Each timing process also validates its selected projections against the source oracle before measuring.
 
 These are prototype readers using the existing external codec harness, including repository-local experimental encodings. They are not a production implementation or an interoperable public encoding profile. Selective validation checks the accessed ranges; preparation and full validation check the complete source outputs.
 

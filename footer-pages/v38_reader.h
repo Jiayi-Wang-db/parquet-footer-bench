@@ -49,38 +49,44 @@ struct Hierarchy {
 namespace corebench {
 struct DirectCore : FastCore {
   v38::Hierarchy hierarchy;
+  std::vector<int64_t> dictionary_offsets;
   DirectCore(matched::Data& d,int scope,bool full):FastCore(d,scope,full),hierarchy(pages,d.C) {
     Require(version==38,"V38 core version");
+    // Reuse one decoded table for full scans; selective reads keep scalar lookup.
+    if(full) {
+      dictionary_offsets.resize(hierarchy.D);
+      Read(401,2,0,hierarchy.D,[&](int i,const Bound& b){dictionary_offsets[i]=Number(b);});
+    }
   }
-  static int64_t Number(Bound b) {
+  static int64_t Number(const Bound& b) {
     Require(b.present && b.bits<=INT64_MAX,"Missing or negative location");return b.bits;
   }
   void Column(int c,matched::Output& out) {
     auto [lo,hi]=hierarchy.Chunks(c);std::vector<matched::ChunkInfo> chunks(hi-lo);
-    Read(607,2,lo,hi,[&](int i,Bound b){chunks[i].data=Number(b);});
-    Read(608,2,lo,hi,[&](int i,Bound b){
+    Read(607,2,lo,hi,[&](int i,const Bound& b){chunks[i].data=Number(b);});
+    Read(608,2,lo,hi,[&](int i,const Bound& b){
       int64_t n=Number(b);Require(chunks[i].data<=d.base && n<=d.base-chunks[i].data,"Data extent");
       chunks[i].end=chunks[i].data+n;
     });
-    Read(602,1,lo,hi,[&](int i,Bound b){
+    Read(602,1,lo,hi,[&](int i,const Bound& b){
       Require(!b.present || b.bits<uint64_t(hierarchy.D),"Dictionary ID");
-      chunks[i].dict=b.present?At(401,2,b.bits):-1;
+      chunks[i].dict=b.present?(pages.bulk?dictionary_offsets[b.bits]:At(401,2,b.bits)):-1;
       Require(!b.present || (chunks[i].dict>=0 && chunks[i].dict<d.base),"Dictionary offset");
     });
-    Read(601,1,lo,hi,[&](int i,Bound b){Require(b.present,"Codec");chunks[i].codec=b.bits;});
-    Read(605,2,lo,hi,[&](int i,Bound b){chunks[i].values=Number(b);});
+    Read(601,1,lo,hi,[&](int i,const Bound& b){Require(b.present,"Codec");chunks[i].codec=b.bits;});
+    Read(605,2,lo,hi,[&](int i,const Bound& b){chunks[i].values=Number(b);});
     // The matched projection requests uncompressed sizes, present in this corpus.
-    Read(604,2,lo,hi,[&](int i,Bound b){chunks[i].uncompressed=Number(b);});
-    Read(603,0,lo,hi,[&](int i,Bound b){Require(b.present && b.bits<=1,"Dictionary flag");chunks[i].fully=b.bits;});
+    Read(604,2,lo,hi,[&](int i,const Bound& b){chunks[i].uncompressed=Number(b);});
+    Read(603,0,lo,hi,[&](int i,const Bound& b){Require(b.present && b.bits<=1,"Dictionary flag");chunks[i].fully=b.bits;});
     std::vector<int> starts;std::vector<layouts::DataPage> ps;
     if(scenario==2) {
       Require(hierarchy.P>=0,"Missing page index");starts.resize(hi-lo+1);
       starts[0]=hierarchy.Boundary(302,lo);
-      Read(302,1,lo,hi,[&](int i,Bound b){Require(b.present && b.bits<=INT32_MAX,"Page end");starts[i+1]=b.bits;});
+      Read(302,1,lo,hi,[&](int i,const Bound& b){Require(b.present && b.bits<=INT32_MAX,"Page end");starts[i+1]=b.bits;});
       Require(std::is_sorted(starts.begin(),starts.end()) && starts.back()<=hierarchy.P,"Page index order");
       ps.resize(starts.back()-starts.front());
-      Read(403,2,starts.front(),starts.back(),[&](int i,Bound b){ps[i].offset=Number(b);});
-      Read(701,2,starts.front(),starts.back(),[&](int i,Bound b){ps[i].first=Number(b);});
+      Read(403,2,starts.front(),starts.back(),[&](int i,const Bound& b){ps[i].offset=Number(b);});
+      Read(701,2,starts.front(),starts.back(),[&](int i,const Bound& b){ps[i].first=Number(b);});
       int first=starts.front();for(int& start:starts)start-=first;
       for(int k=0;k<hi-lo;++k) {
         int a=starts[k],b=starts[k+1];int64_t length=chunks[k].end-chunks[k].data;
