@@ -51,7 +51,6 @@ struct ColumnSetMetadata {
  * Set size/order is unrestricted. Every physical column belongs to exactly one
  * set, including empty columns; a zero-column file has no sets. Validate membership
  * against schema: union is [0,N), with no duplicate or out-of-range ordinals.
- * New layout/version; incompatible with historical contiguous-range/leading-zero drafts.
  */
 struct ColumnSetFooter {
   1: required i32 version; // Allocation pending.

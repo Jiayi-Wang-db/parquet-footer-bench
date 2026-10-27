@@ -1,5 +1,4 @@
 /** Modular footer with explicit column -> chunk -> page indexes.
- * This layout differs from measured V38; a new wire version is pending.
  * Encryption is schema-only.
  *
  * C = physical columns; K_c = chunks in column c; K = sum(K_c).
@@ -276,7 +275,7 @@ struct FileInfo {
  * must not overlap. See the PME section for authentication and AAD rules.
  */
 struct ModularFooterV2 {
-  1: required i32 version; // Allocation pending; do not serialize this layout as V38.
+  1: required i32 version; // Allocation pending.
 
   /** Exactly one of file_info and encrypted_file_info must be present. */
   2: optional FileInfo file_info;
