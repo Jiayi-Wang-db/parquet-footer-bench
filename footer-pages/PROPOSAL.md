@@ -71,8 +71,8 @@ dictionary_ids:        [0, 0, null]
 dictionary_metadata.offsets: [800]
 dictionary_metadata.lengths: [100]
 relative_page_offsets: [0, 100, 0, 0, 200]
-first_row_index:       [0, 100, 0]
-page_first_rows:       [0, 50, 100, 0, 80]
+column_chunk_metadata.first_row_index: [0, 100, 0]
+page_metadata.first_row_index: [0, 50, 100, 0, 80]
 ```
 
 The equivalent logical page-offset grouping is `[[[0, 100], [0]], [[0, 200]]]`. Its hierarchy is stored once in the two prefix arrays, rather than repeated as RL/DL in each leaf.
@@ -85,7 +85,7 @@ The equivalent logical page-offset grouping is `[[[0, 100], [0]], [[0, 200]]]`. 
 
 `PageMetadata.relative_page_offsets` contains one non-null `i64` per page, relative to its chunk's `offsets[k]`. The first offset of each nonempty chunk is zero. A page ends at the next page offset in that chunk, or at `offsets[k] + compressed_size[k]` for the last page.
 
-The page-offset and page-row streams are independently optional. Each present stream has exactly `P` positions; the offset stream includes the zero for a single-page chunk. A reader that knows a chunk has one page can derive its byte extent from the chunk's offset and length without reading that offset. Omitting the first offset from storage would require remapping page positions for the shorter offset array, including handling empty chunks; this draft keeps those positions aligned with other page fields. `page_index` is required whenever `PageMetadata` is present. PAGE statistics require `page_first_rows`; omit `PageMetadata` when both streams are absent.
+The page-offset and page-row streams are independently optional. Each present stream has exactly `P` positions; the offset stream includes the zero for a single-page chunk. A reader that knows a chunk has one page can derive its byte extent from the chunk's offset and length without reading that offset. Omitting the first offset from storage would require remapping page positions for the shorter offset array, including handling empty chunks; this draft keeps those positions aligned with other page fields. `page_index` is required whenever `PageMetadata` is present. PAGE statistics require `PageMetadata.first_row_index`; omit `PageMetadata` when both streams are absent.
 
 Optional row-group metadata retains row counts in `RowGroupMetadata.num_rows`. Its optional `RowGroupMetadata.offsets` stream holds `G + 1` absolute byte boundaries only when complete row groups occupy contiguous intervals in row-group order. Interleaved layouts or dictionaries shared across row groups can omit this byte-range hint; chunk and dictionary locations remain sufficient.
 
@@ -103,11 +103,11 @@ enum RowRangeKind {
 
 | Tag | Number of range positions | Column ownership | Row starts |
 |---|---|---|---|
-| `COLUMN_CHUNK` | `K` | `column_chunk_index` | Shared `first_row_index` |
-| `PAGE` | `P` | `column_chunk_index` and `page_index` | Shared `page_first_rows` |
+| `COLUMN_CHUNK` | `K` | `column_chunk_index` | Shared `ColumnChunkMetadata.first_row_index` |
+| `PAGE` | `P` | `column_chunk_index` and `page_index` | Shared `PageMetadata.first_row_index` |
 | `ARBITRARY` | `S` | Separate `column_range_starts` | Set-specific `range_start_rows` |
 
-Only `ARBITRARY` stores the additional index and row starts. `column_range_starts` has `C + 1` non-null `i64` entries; equal adjacent entries mean a column has no ranges in that set. Chunk statistics require `first_row_index`, so reading them does not require page metadata. Page statistics require page-row metadata but do not require page offsets.
+Only `ARBITRARY` stores the additional index and row starts. `column_range_starts` has `C + 1` non-null `i64` entries; equal adjacent entries mean a column has no ranges in that set. Chunk statistics require `ColumnChunkMetadata.first_row_index`, so reading them does not require page metadata. Page statistics require page-row metadata but do not require page offsets.
 
 For the positional tags, missing statistics retain their positions as unknown values. A column with unavailable or independently encrypted statistics must not shift another column's positions. An entire unavailable leaf stream can be omitted. Scalar flags and distinct counts have one nullable value per range. Typed min/max streams contain paired values `[min_0, max_0, min_1, max_1, ...]`, with `2S` positions; exactness flags use the same pairing. A range's entries in other physical-type streams are null.
 

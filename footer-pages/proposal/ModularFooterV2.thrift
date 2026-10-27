@@ -39,7 +39,7 @@
  *   dictionary_metadata.lengths: [100]
  *   page_index:            [2, 3, 5]
  *   relative_page_offsets: [0, 100, 0, 0, 200]
- *   page_first_rows:       [0, 50, 100, 0, 80]
+ *   page_metadata.first_row_index: [0, 50, 100, 0, 80]
  * C = column_chunk_index.length, checked against FileInfo.num_columns.
  * K = column_chunk_index[C-1] when C>0, otherwise 0.
  * When page_index is present, its length is K and P is its last value,
@@ -57,7 +57,7 @@
  *   message offsets { required int64 value; } // DictionaryMetadata.offsets
  *   message lengths { required int64 value; } // DictionaryMetadata.lengths
  *   message relative_page_offsets { required int64 value; }
- *   message page_first_rows { required int64 value; }
+ *   message first_row_index { required int64 value; } // PageMetadata.first_row_index
  *
  * Readers validate lengths, monotonic indexes and terminal counts. Authenticate
  * or decrypt an index stream before using it to interpret dependent streams.
@@ -108,7 +108,7 @@ struct DataLayout {
    * Non-decreasing cumulative ends; last value is P. Empty when K=0, then P=0.
    * Chunk k owns pages [boundary(page_index,k), page_index[k]).
    * Required when PageMetadata is present. PAGE statistics require
-   * PageMetadata.page_first_rows and therefore this index.
+   * PageMetadata.first_row_index and therefore this index.
    * Otherwise it may be omitted; source page headers then supply page grouping.
    */
   2: optional StreamLocation page_index;
@@ -237,11 +237,11 @@ struct PageMetadata {
    * read source-data pages to determine row positions. Chunk membership and
    * num_values do not supply row positions.
    */
-  1: optional StreamLocation page_first_rows;
+  1: optional StreamLocation first_row_index;
 
   /** list<i64>; number of values = P.
    * Nullability: list and values are non-null. No repetition/definition levels.
-   * Requires DataLayout.page_index; page_first_rows is independently optional.
+   * Requires DataLayout.page_index; first_row_index is independently optional.
    * Offsets are RELATIVE to ColumnChunkMetadata.offsets[k]. Each nonempty
    * chunk starts at 0 and strictly increases below compressed_size[k]; the last
    * page ends at offsets[k] + compressed_size[k]. Retain the first zero even
@@ -329,7 +329,7 @@ struct RangeStatistics {
    * independently per column. Never derive row counts from num_values.
    *
    * PAGE: one range per data page of each participating column, in page order.
-   * Requires PageMetadata.page_first_rows and DataLayout.page_index.
+   * Requires PageMetadata.first_row_index and DataLayout.page_index.
    * Column membership comes from DataLayout.column_chunk_index.
    * Each participating chunk has at least one page.
    *
@@ -397,7 +397,8 @@ struct ColumnRangeStatistics {
  * Only the column's physical-type bound stream may be present, with 2S entries.
  * All StreamLocation offsets here are relative to page_streams, which contains
  * every explicitly located stream. Positional tags additionally depend on
- * authenticated shared metadata, including first_row_index for COLUMN_CHUNK.
+ * authenticated shared metadata, including ColumnChunkMetadata.first_row_index
+ * for COLUMN_CHUNK.
  */
 struct ColumnRowRangeStatistics {
   /** Independent granularities; nonempty, with the same semantics as the root list.
