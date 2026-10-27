@@ -1,6 +1,6 @@
 # Direct offsets, a dictionary table, and shared explicit indexes
 
-The chosen draft is [ExplicitIndexFooter.thrift](ExplicitIndexFooter.thrift), local experiment V38. It retains V35's direct data extents, dictionary table, and statistics tags, and omits the fixed leading zero from both hierarchy indexes. [PROPOSAL.md](PROPOSAL.md) describes the complete format for review. The measurements below use the archived [V35 definition](legacy/ExplicitIndexFooterV35.thrift).
+The chosen draft is [ExplicitIndexFooter.thrift](ExplicitIndexFooter.thrift), local experiment V38. It retains V35's direct data extents, dictionary table, and statistics tags, and omits the fixed leading zero from both hierarchy indexes. [PROPOSAL.md](PROPOSAL.md) describes the complete format for review. [Fresh V38 measurements](V38-MEASUREMENTS.md) compare size and decoding with current Parquet Thrift and the modular footer. The historical measurements below use the archived [V35 definition](legacy/ExplicitIndexFooterV35.thrift).
 
 | Field | Type | Values | Nullability |
 |---|---|---:|---|
@@ -23,7 +23,7 @@ Optional row-group metadata supplies row counts and, where applicable, absolute 
 
 ## Core size without Zstd
 
-Complete V35 core bytes, including schema, directories, metadata page headers, null levels, and trailer. V35 stored the leading zero in both hierarchy indexes; these numbers have not been remeasured for V38. Integer encodings remain enabled. Direct variants allow metadata pages to end at column boundaries, choosing the original stream encoding if smaller. These are whole-file core sizes, not column-set measurements.
+Complete V35 core bytes, including schema, directories, metadata page headers, null levels, and trailer. V35 stored the leading zero in both hierarchy indexes; the [fresh V38 core total](V38-MEASUREMENTS.md#core-size) differs by just +1 byte across these eight datasets. Integer encodings remain enabled. Direct variants allow metadata pages to end at column boundaries, choosing the original stream encoding if smaller. These are whole-file core sizes, not column-set measurements.
 
 | Dataset | Original modular core | Region-map core | Direct + dictionary table | vs modular |
 |---|---:|---:|---:|---:|
@@ -49,4 +49,4 @@ The local reproduction script is `work/direct-explicit-20261026/validate.py`; it
 
 The V37 logical-set check, `work/logical-column-sets-20261027/validate.py`, reuses that local harness and reads real encoded page streams through absolute `StreamLocation` descriptors. Ten files deliberately interleave streams across sets, place statistics before locations, and insert gaps between streams. The 414 guarded stream reads cover same-column dictionary reuse, unequal and empty columns, absent dictionaries/statistics, a zero-column file, and COLUMN_CHUNK/PAGE/ARBITRARY statistics. Location reads fetch no statistics payloads; later statistics reads request individual leaves and reuse the set's indexes. Four negative cases reject invalid column partitions, out-of-bounds stream extents, overlapping streams, and the old block-layout version. These are correctness checks, not new size or speed measurements.
 
-V35/V36 change field meanings and must not be decoded as V31/V34. V37 inlines set descriptors and replaces relative stream locations with absolute locations, so it must not be decoded as V36. V36/V37 remain pinned to V35's leading-zero indexes; V38's cumulative-end indexes require the revised base schema. Historical generators use [ExplicitIndexFooterV31.thrift](legacy/ExplicitIndexFooterV31.thrift) and [ColumnSetFooterV34.thrift](legacy/ColumnSetFooterV34.thrift). Existing native speed measurements apply to those historical region-map formats. No V35/V36/V37/V38 decoding-speed or storage-I/O benchmark has been run; encryption remains a schema draft.
+V35/V36 change field meanings and must not be decoded as V31/V34. V37 inlines set descriptors and replaces relative stream locations with absolute locations, so it must not be decoded as V36. V36/V37 remain pinned to V35's leading-zero indexes; V38's cumulative-end indexes require the revised base schema. Historical generators use [ExplicitIndexFooterV31.thrift](legacy/ExplicitIndexFooterV31.thrift) and [ColumnSetFooterV34.thrift](legacy/ColumnSetFooterV34.thrift). [V38 decoding measurements](V38-MEASUREMENTS.md#decoding-by-query) now cover the direct-offset design; V35–V37 were not timed directly. Storage I/O is not benchmarked, and encryption remains a schema draft.
