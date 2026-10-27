@@ -23,7 +23,7 @@ Optional row-group metadata supplies row counts and, where applicable, absolute 
 
 ## Core size without Zstd
 
-Complete V35 core bytes, including schema, directories, metadata page headers, null levels, and trailer. V35 stored the leading zero in both hierarchy indexes; the [fresh V38 core total](V38-MEASUREMENTS.md#core-size) differs by just +1 byte across these eight datasets. Integer encodings remain enabled. Direct variants allow metadata pages to end at column boundaries, choosing the original stream encoding if smaller. These are whole-file core sizes, not column-set measurements.
+Complete V35 core bytes, including schema, directories, metadata page headers, null levels, and trailer. V35 stored the leading zero in both hierarchy indexes; the [fresh V38 measurements](V38-MEASUREMENTS.md#core-size) differ by just +1 byte for these same eight datasets and also cover four additional datasets. Integer encodings remain enabled. Direct variants allow metadata pages to end at column boundaries, choosing the original stream encoding if smaller. These are whole-file core sizes, not column-set measurements.
 
 | Dataset | Original modular core | Region-map core | Direct + dictionary table | vs modular |
 |---|---:|---:|---:|---:|

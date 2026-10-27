@@ -2,12 +2,16 @@
 
 Fresh comparison of current Parquet Compact Thrift, the modular footer, and V38. V38 stores direct chunk offsets/lengths, a dictionary offset/length table, nullable chunk dictionary IDs, and shared cumulative-end indexes. Both hierarchy indexes omit the fixed leading zero; relative page offsets retain one value per page, including each chunk’s first zero.
 
-All metadata is encoded without Zstd. Size is the complete retained metadata, including schema, directories, page headers, required external indexes, and trailer. Integer and dictionary encodings remain enabled. The source corpus is the same eight parquet-java files described in [EXPERIMENT-RESULTS.md](EXPERIMENT-RESULTS.md#2-java-written-inputs).
+All metadata is encoded without Zstd. Size is the complete retained metadata, including schema, directories, page headers, required external indexes, and trailer. Integer and dictionary encodings remain enabled. Sizes cover all 12 parquet-java files described in [EXPERIMENT-RESULTS.md](EXPERIMENT-RESULTS.md#2-java-written-inputs); timings cover the eight files from cohorts B/C.
 
 ## Core size
 
 | Dataset | Current bytes | Modular bytes | V38 bytes | V38 − V35 bytes |
 |---|---:|---:|---:|---:|
+| US Accidents | 3,963 | 1,937 | 2,099 | — |
+| FineWeb | 6,209 | 1,966 | 2,359 | — |
+| Hacker News | 1,990 | 936 | 1,314 | — |
+| NYC Taxi | 2,042 | 1,034 | 1,371 | — |
 | UCI Adult | 1,370 | 728 | 1,061 | +0 |
 | Household Power | 935 | 540 | 912 | +0 |
 | Kepler Search | 13,307 | 5,850 | 5,405 | +0 |
@@ -16,9 +20,87 @@ All metadata is encoded without Zstd. Size is the complete retained metadata, in
 | BI-USCensus | 750,267 | 226,675 | 185,889 | +0 |
 | BI-Wins | 333,040 | 106,014 | 88,590 | +0 |
 | Kepler Time Series | 221,661 | 91,407 | 60,084 | +0 |
-| **Total** | **1,831,915** | **582,762** | **461,815** | **+1** |
+| **Total** | **1,846,119** | **588,635** | **468,958** | **+1 (8 matched)** |
 
-Removing two logical values does not guarantee fewer encoded bytes. V38 re-encodes only the affected hierarchy streams with the existing encoding/capacity sweep; all other streams match V35 byte-for-byte. Changed first values and encoding parameters can offset the removed zeros.
+Removing two logical values does not guarantee fewer encoded bytes. For the eight matched V35 datasets, V38 re-encodes only the affected hierarchy streams; all other streams match V35 byte-for-byte. Changed first values and encoding parameters can offset the removed zeros. A dash means no V35 measurement.
+
+The four original shards are converted from their saved V21 artifacts using the same V38 layout, direct-location encoding sweep, and column-aligned metadata page policy. Core/chunk-statistics scopes omit the optional page index. Statistics value streams are preserved byte-for-byte; their row-range tags and shared indexes are updated.
+
+FineWeb has no page statistics for one column. Its page-statistics set uses the supported ARBITRARY form to preserve that sparse coverage; complete chunk/page sets reuse the shared indexes.
+
+## Size at every scope
+
+### Core
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
+|---|---:|---:|---:|
+| US Accidents | 3,963 | 1,937 | 2,099 |
+| FineWeb | 6,209 | 1,966 | 2,359 |
+| Hacker News | 1,990 | 936 | 1,314 |
+| NYC Taxi | 2,042 | 1,034 | 1,371 |
+| UCI Adult | 1,370 | 728 | 1,061 |
+| Household Power | 935 | 540 | 912 |
+| Kepler Search | 13,307 | 5,850 | 5,405 |
+| AMPds | 913 | 520 | 873 |
+| ClickBench | 510,422 | 151,028 | 119,001 |
+| BI-USCensus | 750,267 | 226,675 | 185,889 |
+| BI-Wins | 333,040 | 106,014 | 88,590 |
+| Kepler Time Series | 221,661 | 91,407 | 60,084 |
+| **Total** | **1,846,119** | **588,635** | **468,958** |
+
+### Core + chunk statistics
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
+|---|---:|---:|---:|
+| US Accidents | 6,030 | 4,846 | 3,714 |
+| FineWeb | 23,553 | 17,878 | 17,690 |
+| Hacker News | 3,323 | 2,281 | 2,324 |
+| NYC Taxi | 2,850 | 2,004 | 1,838 |
+| UCI Adult | 1,666 | 1,431 | 1,454 |
+| Household Power | 1,119 | 944 | 1,251 |
+| Kepler Search | 19,281 | 12,922 | 7,937 |
+| AMPds | 1,273 | 1,085 | 1,187 |
+| ClickBench | 734,357 | 262,202 | 192,476 |
+| BI-USCensus | 1,090,768 | 371,313 | 224,400 |
+| BI-Wins | 500,148 | 197,470 | 109,519 |
+| Kepler Time Series | 362,345 | 246,575 | 85,501 |
+| **Total** | **2,746,713** | **1,120,951** | **649,291** |
+
+### Core + chunk statistics + page locations
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
+|---|---:|---:|---:|
+| US Accidents | 41,612 | 25,854 | 14,453 |
+| FineWeb | 76,446 | 49,437 | 32,203 |
+| Hacker News | 17,638 | 10,946 | 7,847 |
+| NYC Taxi | 51,741 | 29,105 | 14,832 |
+| UCI Adult | 2,319 | 2,099 | 1,724 |
+| Household Power | 13,917 | 7,732 | 5,297 |
+| Kepler Search | 22,498 | 17,467 | 8,071 |
+| AMPds | 10,089 | 5,974 | 3,966 |
+| ClickBench | 8,497,329 | 4,898,177 | 2,196,131 |
+| BI-USCensus | 4,701,379 | 2,581,306 | 1,039,989 |
+| BI-Wins | 1,513,060 | 856,156 | 330,195 |
+| Kepler Time Series | 432,650 | 346,199 | 85,700 |
+| **Total** | **15,380,678** | **8,830,452** | **3,740,408** |
+
+### Core + chunk statistics + page locations + page statistics
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
+|---|---:|---:|---:|
+| US Accidents | 101,244 | 79,147 | 48,251 |
+| FineWeb | 145,670 | 112,171 | 84,197 |
+| Hacker News | 140,991 | 132,831 | 122,836 |
+| NYC Taxi | 113,762 | 82,850 | 34,590 |
+| UCI Adult | 3,313 | 3,354 | 2,346 |
+| Household Power | 27,324 | 19,596 | 13,135 |
+| Kepler Search | 28,443 | 25,952 | 10,640 |
+| AMPds | 20,541 | 14,758 | 8,990 |
+| ClickBench | 21,868,253 | 16,887,807 | 9,794,399 |
+| BI-USCensus | 7,986,845 | 5,564,773 | 1,511,418 |
+| BI-Wins | 2,563,144 | 1,819,241 | 493,400 |
+| Kepler Time Series | 554,166 | 530,149 | 111,111 |
+| **Total** | **33,553,696** | **25,272,629** | **12,235,313** |
 
 ## Decoding by query
 
@@ -84,6 +166,8 @@ Each projection constructs and checksums the same logical output. Chunk metadata
 
 Release and ASan/UBSan each pass **2,508 cross-format queries** against the independent source oracle and **88 fixture checks**. Fixtures cover unequal/empty columns, zero-page chunks, same-column dictionary reuse, absent dictionaries, zero-column files, chunk/page/arbitrary statistics, missing bounds, statistics without page offsets, and malformed indexes/locations/statistics. Output hashes agree across formats. The real corpus uses regular row-group-aligned chunks; ragged layouts are correctness fixtures, not timing workloads.
 
+The four additional size datasets pass another **960 cross-format queries** in both release and ASan/UBSan, using the unchanged native executable. All 16 new V38 artifacts are parsed through the current Thrift definition and checked against source chunk/dictionary extents; retained statistics streams are verified byte-for-byte. They have no new decoding timings.
+
 These are prototype readers using the existing external codec harness, including repository-local experimental encodings. They are not a production implementation or an interoperable public encoding profile. Selective validation checks the accessed ranges; preparation and full validation check the complete source outputs.
 
 ## Reproduction
@@ -94,4 +178,4 @@ The checked-in writer/orchestrator is [v38_benchmark.py](v38_benchmark.py); nati
 /home/jiayi.wang/raincloud/.venv/bin/python footer-pages/v38_benchmark.py --stage all
 ```
 
-The [CSV](proposal-comparison.csv) contains all 32 dataset/scope combinations for all three formats. Scope 0 is core; 1 adds chunk statistics; 2 adds page locations; 3 adds page statistics. The [result archive](v38-results.json.gz) records all trial samples, per-position/process medians, validation results, artifact/source hashes, CPU information, and exact build commands.
+The [CSV](proposal-comparison.csv) contains all 48 dataset/scope combinations for all three formats. Scope 0 is core; 1 adds chunk statistics; 2 adds page locations; 3 adds page statistics. Blank timing cells identify the four datasets measured for size only. The [result archive](v38-results.json.gz) records all trial samples, per-position/process medians, validation results, artifact/source hashes, CPU information, and exact build commands.

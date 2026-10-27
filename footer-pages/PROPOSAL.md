@@ -162,20 +162,87 @@ Smaller sets reduce metadata fetched for narrow projections but add descriptors 
 
 ## Size and decoding comparison
 
-Fresh measurements of V38 against the existing Parquet Compact-Thrift footer (current) and the modular footer. All three formats use the same eight input files and run interleaved in one benchmark executable. Metadata is encoded without Zstd. V38 uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.
+V38 is compared with the existing Parquet Compact-Thrift footer (current) and the modular footer on the same inputs. Size measurements cover all 12 datasets; decoding timings cover eight datasets, with all three formats interleaved in one executable. Metadata is encoded without Zstd. V38 uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.
 
 ### Size
 
-ClickBench, bytes of complete metadata at each cumulative scope, including schema, directories, page headers, and required external indexes:
+All values are bytes of complete metadata at each cumulative scope, including schema, directories, page headers, required external indexes, and trailer. Each table includes every dataset in the corpus.
 
-| Metadata retained | Current Parquet Thrift | Modular footer | V38 |
+#### Core
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
 |---|---:|---:|---:|
-| Core | 510,422 | 151,028 | 119,001 |
-| Core + chunk statistics | 734,357 | 262,202 | 192,476 |
-| Core + chunk statistics + page locations | 8,497,329 | 4,898,177 | 2,196,131 |
-| Core + chunk statistics + page locations + page statistics | 21,868,253 | 16,887,807 | 9,794,399 |
+| US Accidents | 3,963 | 1,937 | 2,099 |
+| FineWeb | 6,209 | 1,966 | 2,359 |
+| Hacker News | 1,990 | 936 | 1,314 |
+| NYC Taxi | 2,042 | 1,034 | 1,371 |
+| UCI Adult | 1,370 | 728 | 1,061 |
+| Household Power | 935 | 540 | 912 |
+| Kepler Search | 13,307 | 5,850 | 5,405 |
+| AMPds | 913 | 520 | 873 |
+| ClickBench | 510,422 | 151,028 | 119,001 |
+| BI-USCensus | 750,267 | 226,675 | 185,889 |
+| BI-Wins | 333,040 | 106,014 | 88,590 |
+| Kepler Time Series | 221,661 | 91,407 | 60,084 |
+| **Total** | **1,846,119** | **588,635** | **468,958** |
 
-Across all eight datasets, core metadata totals **1,831,915 bytes** for current Thrift, **582,762** for modular, and **461,815** for V38: reductions of 74.8% and 20.8%, respectively. Small core footers can still be larger than modular. Omitting the initial zeros changes the total by only +1 byte versus V35; encoding headers and first-value encoding can offset the removed values.
+#### Core + chunk statistics
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
+|---|---:|---:|---:|
+| US Accidents | 6,030 | 4,846 | 3,714 |
+| FineWeb | 23,553 | 17,878 | 17,690 |
+| Hacker News | 3,323 | 2,281 | 2,324 |
+| NYC Taxi | 2,850 | 2,004 | 1,838 |
+| UCI Adult | 1,666 | 1,431 | 1,454 |
+| Household Power | 1,119 | 944 | 1,251 |
+| Kepler Search | 19,281 | 12,922 | 7,937 |
+| AMPds | 1,273 | 1,085 | 1,187 |
+| ClickBench | 734,357 | 262,202 | 192,476 |
+| BI-USCensus | 1,090,768 | 371,313 | 224,400 |
+| BI-Wins | 500,148 | 197,470 | 109,519 |
+| Kepler Time Series | 362,345 | 246,575 | 85,501 |
+| **Total** | **2,746,713** | **1,120,951** | **649,291** |
+
+#### Core + chunk statistics + page locations
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
+|---|---:|---:|---:|
+| US Accidents | 41,612 | 25,854 | 14,453 |
+| FineWeb | 76,446 | 49,437 | 32,203 |
+| Hacker News | 17,638 | 10,946 | 7,847 |
+| NYC Taxi | 51,741 | 29,105 | 14,832 |
+| UCI Adult | 2,319 | 2,099 | 1,724 |
+| Household Power | 13,917 | 7,732 | 5,297 |
+| Kepler Search | 22,498 | 17,467 | 8,071 |
+| AMPds | 10,089 | 5,974 | 3,966 |
+| ClickBench | 8,497,329 | 4,898,177 | 2,196,131 |
+| BI-USCensus | 4,701,379 | 2,581,306 | 1,039,989 |
+| BI-Wins | 1,513,060 | 856,156 | 330,195 |
+| Kepler Time Series | 432,650 | 346,199 | 85,700 |
+| **Total** | **15,380,678** | **8,830,452** | **3,740,408** |
+
+#### Core + chunk statistics + page locations + page statistics
+
+| Dataset | Current Parquet Thrift | Modular footer | V38 |
+|---|---:|---:|---:|
+| US Accidents | 101,244 | 79,147 | 48,251 |
+| FineWeb | 145,670 | 112,171 | 84,197 |
+| Hacker News | 140,991 | 132,831 | 122,836 |
+| NYC Taxi | 113,762 | 82,850 | 34,590 |
+| UCI Adult | 3,313 | 3,354 | 2,346 |
+| Household Power | 27,324 | 19,596 | 13,135 |
+| Kepler Search | 28,443 | 25,952 | 10,640 |
+| AMPds | 20,541 | 14,758 | 8,990 |
+| ClickBench | 21,868,253 | 16,887,807 | 9,794,399 |
+| BI-USCensus | 7,986,845 | 5,564,773 | 1,511,418 |
+| BI-Wins | 2,563,144 | 1,819,241 | 493,400 |
+| Kepler Time Series | 554,166 | 530,149 | 111,111 |
+| **Total** | **33,553,696** | **25,272,629** | **12,235,313** |
+
+Across all 12 datasets, core metadata totals **1,846,119 bytes** for current Thrift, **588,635** for modular, and **468,958** for V38: reductions of 74.6% and 20.3%, respectively. Small core footers can still be larger than modular. For the eight datasets with V35 measurements, omitting the initial zeros changes the core total by only +1 byte; encoding headers and first-value encoding can offset the removed values.
+
+FineWeb has no page statistics for one column. Its page-statistics set uses the supported ARBITRARY form to preserve that sparse coverage; complete chunk/page sets reuse the shared indexes.
 
 ### Decoding time
 
