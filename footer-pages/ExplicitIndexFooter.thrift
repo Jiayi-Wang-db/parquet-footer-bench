@@ -1,12 +1,13 @@
 /** Standalone draft: explicit indexes for the column -> chunk -> page hierarchy.
  * All proposal types are local; parquet.thrift supplies standard Parquet types.
- * Plaintext hierarchy and tagged-statistics index reuse are prototyped as
- * repository-local experiment V31; see REFINED-HIERARCHY.md for measurements.
- * This differs from V23/V30. Encryption and other unmeasured extensions remain
- * schema-only. V31 is not an allocated public format identifier.
+ * V35 combines direct chunk offsets/lengths, a dictionary table, and the V31
+ * shared indexes and tagged statistics. It replaces V31's region map; these
+ * versions are not wire-compatible. See legacy/ExplicitIndexFooterV31.thrift
+ * for the historical measurements. Encryption remains schema-only.
+ * V35 is a repository-local experiment, not a public format allocation.
  *
  * C = physical columns; K_c = chunks in column c; K = sum(K_c).
- * P_k = data pages in chunk k; P = sum(P_k); R = regions; G = row groups.
+ * P_k = data pages in chunk k; P = sum(P_k); D = dictionaries; G = row groups.
  * M = key/value pairs. Each column has its own chunk count, including zero.
  * K_c need not equal G. Chunk membership does not imply row coverage.
  *
@@ -31,7 +32,11 @@
  *
  * Example: C=2, K=3, P=5; columns have 2 and 1 chunks.
  *   column_chunk_index:    [0, 2, 3]
- *   region_ordinals:       [1, 2, 3]
+ *   data_offsets:          [1000, 1400, 2000]
+ *   data_lengths:          [200, 100, 300]
+ *   dictionary_ids:        [0, 0, null]
+ *   dictionary_offsets:    [800]
+ *   dictionary_lengths:    [100]
  *   page_index:            [0, 2, 3, 5]
  *   relative_page_offsets: [0, 100, 0, 0, 200]
  *   page_first_rows:       [0, 50, 100, 0, 80]
@@ -43,8 +48,11 @@
  * Equivalent per-stream Parquet schemas (illustrative, not serialized):
  *   message column_chunk_index { required int32 value; }
  *   message page_index { required int32 value; }
- *   message region_ordinals { required int32 value; }
- *   message dictionary_regions { optional int32 value; }
+ *   message data_offsets { required int64 value; }
+ *   message data_lengths { required int64 value; }
+ *   message dictionary_ids { optional int32 value; }
+ *   message dictionary_offsets { required int64 value; }
+ *   message dictionary_lengths { required int64 value; }
  *   message relative_page_offsets { required int64 value; }
  *   message page_first_rows { required int64 value; }
  *
@@ -101,29 +109,36 @@ struct DataLayout {
   2: optional StreamLocation page_index;
 }
 
+/** Dictionary table and optional page locations. Chunk extents are stored
+ * directly in ColumnChunkMetadata. Dictionary IDs address table positions;
+ * no additional dictionary-to-column index or region map is stored.
+ */
 struct DataLocation {
-  /** list<i64>; number of values = R+1.
+  /** list<i64>; number of values = D; D must fit in signed i32.
    * Nullability: list and values are non-null.
-   * Strictly increasing absolute file offsets.
-   * Region r occupies [region_offsets[r], region_offsets[r+1]).
-   * A data region contains one chunk's contiguous data pages, including headers
-   * and bodies. Dictionary pages occupy separate regions; other regions may
-   * contain arbitrary data.
+   * Absolute offsets of complete source dictionary pages, including headers.
+   * Store each referenced dictionary once. Dictionaries can be before or after
+   * their data chunks; no adjacency or file-order requirement is imposed.
+   * First-reference table order is recommended for compact dictionary IDs.
+   * Both table streams have zero values when no chunk uses a dictionary.
    */
-  1: required StreamLocation region_offsets;
+  1: required StreamLocation dictionary_offsets;
 
-  /** list<i32>; number of values = K.
-   * Nullability: list and values are non-null. No repetition/definition levels.
-   * Data-region ordinals, unique, in [0,R), disjoint from dictionary regions.
-   * Grouped by DataLayout.column_chunk_index, like every other chunk field.
+  /** list<i64>; number of values = D.
+   * Nullability: list and values are non-null; all lengths are positive.
+   * Stored byte lengths, including the dictionary page header and body.
+   * Dictionary d occupies [dictionary_offsets[d], offset + dictionary_lengths[d]).
+   * Extents are disjoint from data extents and other dictionary entries.
    */
-  2: required StreamLocation region_ordinals;
+  2: required StreamLocation dictionary_lengths;
 
   /** list<i64>; number of values = P.
    * Nullability: list and values are non-null. No repetition/definition levels.
    * Requires DataLayout.page_index, shared with page_first_rows.
-   * Offsets are RELATIVE to the chunk's data-region start. Each nonempty chunk
-   * starts at 0 and strictly increases; its final page ends at the region end.
+   * Offsets are RELATIVE to ColumnChunkMetadata.data_offsets[k]. Each nonempty
+   * chunk starts at 0 and strictly increases below data_lengths[k]; the last
+   * page ends at data_offsets[k] + data_lengths[k]. Retain the first zero even
+   * for a single-page chunk, so positions align with other page fields.
    * If absent, locating interior pages requires scanning source-data page headers.
    */
   3: optional StreamLocation relative_page_offsets;
@@ -136,13 +151,14 @@ struct RowGroupMetadata {
    */
   1: required StreamLocation row_group_num_rows;
 
-  /** list<i32>; number of values = G+1.
+  /** list<i64>; number of values = G+1.
    * Nullability: list and values are non-null.
-   * Region-boundary ordinals. Row group g occupies regions
-   * [row_group_ordinals[g], row_group_ordinals[g+1]). Byte endpoints follow
-   * from DataLocation.region_offsets; dictionaries are included.
+   * Non-decreasing absolute byte boundaries, if row groups occupy contiguous
+   * intervals in row-group order. Omit for interleaved layouts or dictionaries
+   * shared across row groups when a complete row-group extent cannot be given.
+   * Readers use chunk and dictionary locations independently of this hint.
    */
-  2: required StreamLocation row_group_ordinals;
+  2: optional StreamLocation row_group_offsets;
 }
 
 /** Flat fields grouped by DataLayout.column_chunk_index. */
@@ -155,12 +171,16 @@ struct ColumnChunkMetadata {
 
   /** list<i32>; number of values = K.
    * Nullability: list is non-null; values are nullable.
-   * Null means no dictionary region. Only this chunk field stores null levels;
+   * Null means no dictionary. Present values are table IDs in [0,D).
+   * Only this chunk field stores null levels;
    * they describe dictionary presence, not column/chunk list boundaries.
-   * Multiple chunks may reference the same dictionary region; each referenced
-   * region contains one complete source dictionary page.
+   * Multiple chunks OF THE SAME PHYSICAL COLUMN may reference the same ID.
+   * Cross-column dictionary sharing is not permitted. Column ownership follows
+   * from column_chunk_index; it does not require another mapping array.
+   * Dictionary bytes and decoding must be compatible with every referencing
+   * chunk, including its codec. Every table entry must be referenced.
    */
-  2: required StreamLocation dictionary_regions;
+  2: required StreamLocation dictionary_ids;
 
   /** list<bool>; number of values = K.
    * Nullability: list and values are non-null.
@@ -183,7 +203,7 @@ struct ColumnChunkMetadata {
 
   /** list<i64>; number of values = K.
    * Nullability: list and values are non-null. No repetition/definition levels.
-   * Absolute first-row indexes, aligned with flattened region_ordinals.
+   * Absolute first-row indexes, aligned with flattened data_offsets.
    * Required when any COLUMN_CHUNK statistics set is present, including
    * independently encrypted statistics. May be omitted otherwise.
    * Counts include chunks in every column; an empty column adds no position.
@@ -191,6 +211,24 @@ struct ColumnChunkMetadata {
    * metadata is present for a nonempty chunk, its first row must agree.
    */
   6: optional StreamLocation chunk_first_rows;
+
+  /** list<i64>; number of values = K.
+   * Nullability: list and values are non-null.
+   * Absolute offsets of each chunk's contiguous data pages, including headers.
+   * Dictionary bytes are excluded. Ordered by column then chunk, with no
+   * requirement that byte offsets increase or that chunks be adjacent.
+   */
+  7: required StreamLocation data_offsets;
+
+  /** list<i64>; number of values = K.
+   * Nullability: list and values are non-null; lengths are non-negative.
+   * Complete stored data-page bytes, excluding the referenced dictionary.
+   * Chunk k occupies [data_offsets[k], data_offsets[k] + data_lengths[k]).
+   * Zero exactly when the chunk has no data pages; nonempty extents are disjoint.
+   * Validate offsets and sums against file bounds without integer overflow.
+   * Length is explicit; never infer it from another chunk or a dictionary.
+   */
+  8: required StreamLocation data_lengths;
 }
 
 struct PageMetadata {
@@ -438,7 +476,7 @@ struct FileInfo {
  *           + LE32(each path component) + LE64(offset) + LE64(length) + LE32(codec).
  *   column stats: file AAD + NEW_ROW_RANGE_STATISTICS_TYPE + LE32(version) + LE32(column ordinal).
  * Stream paths contain Thrift field IDs and zero-based list positions from the
- * root: [4,2] identifies region_ordinals; [8,g,2,7] identifies granularity g's
+ * root: [6,7] identifies data_offsets; [8,g,2,7] identifies granularity g's
  * min_max_int32. The schema distinguishes field IDs from list positions.
  * Numeric module-type allocations are pending; do not reuse existing PME IDs.
  *
@@ -447,7 +485,7 @@ struct FileInfo {
  * expected protection policy; stripping crypto metadata must not downgrade a file.
  */
 struct ExplicitIndexFooter {
-  1: required i32 version; // Experiment V31; no public wire-version allocation.
+  1: required i32 version; // Experiment V35; reject V31 region-map interpretation.
 
   /** Exactly one of file_info and encrypted_file_info must be present. */
   2: optional FileInfo file_info;

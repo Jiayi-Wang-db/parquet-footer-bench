@@ -1,4 +1,4 @@
-/** Column-set experiment; no public wire-version allocation.
+/** Direct-offset column-set draft V36; no public wire-version allocation.
  * Location and statistics are separately fetchable for the same column range.
  * Reuses the explicit-index proposal's fields and encodings. Row-group
  * descriptors and encryption are outside this experiment.
@@ -24,11 +24,13 @@ struct ColumnSetLocation {
   6: optional i64 statistics_length;
 }
 
-/** C, K, P and R in the reused definitions are local to this set.
+/** C, K, P and D in the reused definitions are local to this set.
  * StreamLocation offsets are relative to page_streams. Source-data offsets
- * inside region_offsets remain absolute; page offsets remain chunk-relative.
- * Only referenced region boundaries are retained, in file order. Gaps can
- * form unreferenced local regions; no global region map is needed.
+ * in data_offsets and dictionary_offsets are absolute; page offsets stay relative.
+ * Store only dictionaries referenced by this set and rebase IDs to its table.
+ * Dictionary reuse is confined to one physical column. Sets contain complete
+ * columns, so all references to a dictionary belong to one set: no global
+ * lookup, cross-set references, or duplicated dictionary entries are needed.
  * Null slots and empty columns/chunks keep the existing explicit-index rules.
  */
 struct ColumnSetMetadata {
@@ -53,8 +55,9 @@ struct ColumnSetStatistics {
 }
 
 /** Tail: [all location blocks][all statistics blocks][Compact-Thrift root]
- * [u64 LE root offset][CST2]. V34/CST2 are local experiment identifiers.
- * The historical location-only experiment uses V33/CST1 and omits fields 5/6.
+ * [u64 LE root offset][CST3]. V36/CST3 are local experiment identifiers.
+ * V33/CST1 and V34/CST2 use region maps; see legacy/ColumnSetFooterV34.thrift.
+ * They must not be interpreted with the direct-offset field definitions.
  * FileInfo/schema is stored once. Set size is a writer choice, not a new
  * per-column rule or a requirement for equal chunk counts.
  */
