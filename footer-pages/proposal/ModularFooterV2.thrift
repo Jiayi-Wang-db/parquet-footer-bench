@@ -5,12 +5,10 @@
  * M = key/value pairs. K_c may vary, including zero, independently of G.
  * Chunk membership alone does not determine row coverage.
  *
- * For StreamLocation fields, list<T> in comments describes the decoded values
- * in the referenced Parquet page stream.
- * i32/i64/bool/binary map to INT32/INT64/BOOLEAN/BYTE_ARRAY;
- * float/double map to FLOAT/DOUBLE. Field IDs define types; no stream schema
- * is serialized. FileInfo.schema describes the source data.
- * All lists are non-null; field comments specify value nullability.
+ * StreamLocation comments specify the scalar Parquet type, value count and
+ * nullability. Each stream is a primitive column with no LIST nesting.
+ * Field IDs define types; no stream schema is serialized.
+ * FileInfo.schema describes the source data.
  * Thrift optional controls stream presence, not value nullability.
  * Non-null streams: max RL=DL=0. Nullable streams: max RL=0, max DL=1
  * (DL=0: null; DL=1: present). No hierarchy repetition levels are stored.
@@ -52,13 +50,13 @@ struct StreamLocation {
  * boundary(index,n) = 0 if n=0, else index[n-1], for 0<=n<=length.
  */
 struct DataLayout {
-  /** list<i32>; number of values = C; nullability: non-null.
+  /** INT32; number of values = C; nullability: non-null.
    * C must match FileInfo.num_columns. Non-decreasing; last end is K
    * (K=0 if C=0). Column c owns [boundary(index,c), index[c]) chunks.
    */
   1: required StreamLocation column_chunk_index;
 
-  /** list<i32>; number of values = K; nullability: non-null.
+  /** INT32; number of values = K; nullability: non-null.
    * Non-decreasing; last end is P (P=0 if K=0).
    * Chunk k owns [boundary(index,k), index[k]) pages.
    * Required with PageMetadata; otherwise optional. If absent, use source
@@ -69,14 +67,14 @@ struct DataLayout {
 
 /** Dictionary IDs address table positions; no region or column mapping is stored. */
 struct DictionaryMetadata {
-  /** list<i64>; number of values = D; nullability: non-null. D fits signed i32.
+  /** INT64; number of values = D; nullability: non-null. D fits signed i32.
    * Absolute dictionary-page offsets, including headers. Store each referenced
    * dictionary once; no adjacency/order restriction. First-reference order is
    * recommended. Both streams are empty when no dictionaries are used.
    */
   1: required StreamLocation offsets;
 
-  /** list<i64>; number of values = D; nullability: non-null.
+  /** INT64; number of values = D; nullability: non-null.
    * Positive stored sizes, including headers. Dictionary d occupies
    * [offsets[d], offsets[d]+lengths[d]), disjoint from data and other dictionaries.
    */
@@ -84,12 +82,12 @@ struct DictionaryMetadata {
 }
 
 struct RowGroupMetadata {
-  /** list<i64>; number of values = G; nullability: non-null.
+  /** INT64; number of values = G; nullability: non-null.
    * Row counts in row-group order; sum equals FileInfo.num_rows.
    */
   1: required StreamLocation num_rows;
 
-  /** list<i64>; number of values = G+1; nullability: non-null.
+  /** INT64; number of values = G+1; nullability: non-null.
    * Non-decreasing absolute byte boundaries; optional hint for contiguous
    * row groups in file order. Omit if interleaving or shared dictionaries
    * prevent complete extents. Chunk/dictionary locations remain independent.
@@ -99,12 +97,12 @@ struct RowGroupMetadata {
 
 /** Flat fields grouped by DataLayout.column_chunk_index. */
 struct ColumnChunkMetadata {
-  /** list<i32>; number of values = K; nullability: non-null.
+  /** INT32; number of values = K; nullability: non-null.
    * parquet.CompressionCodec values.
    */
   1: required StreamLocation codecs;
 
-  /** list<i32>; number of values = K; nullability: nullable.
+  /** INT32; number of values = K; nullability: nullable.
    * Null means no dictionary; otherwise an ID in [0,D). Sharing is allowed
    * only within one physical column, as determined by column_chunk_index.
    * Every dictionary must be referenced and compatible with each referencing
@@ -112,36 +110,36 @@ struct ColumnChunkMetadata {
    */
   2: required StreamLocation dictionary_ids;
 
-  /** list<bool>; number of values = K; nullability: non-null.
+  /** BOOLEAN; number of values = K; nullability: non-null.
    * True if all data pages use the chunk's dictionary; false without one.
    */
   3: required StreamLocation is_fully_dictionary_encoded;
 
-  /** list<i64>; number of values = K; nullability: non-null.
+  /** INT64; number of values = K; nullability: non-null.
    * Page headers + uncompressed bodies, counting the dictionary once per
    * referencing chunk, even if shared. Omission means unknown sizes.
    */
   4: optional StreamLocation total_uncompressed_sizes;
 
-  /** list<i64>; number of values = K; nullability: non-null.
+  /** INT64; number of values = K; nullability: non-null.
    * Data-value counts including nulls; not row counts.
    */
   5: required StreamLocation num_values;
 
-  /** list<i64>; number of values = K; nullability: non-null.
+  /** INT64; number of values = K; nullability: non-null.
    * Absolute first rows; required for any COLUMN_CHUNK statistics, including
    * encrypted statistics. Independent of row groups and num_values; must agree
    * with the chunk's first page row when page-row metadata is present.
    */
   6: optional StreamLocation first_row_index;
 
-  /** list<i64>; number of values = K; nullability: non-null.
+  /** INT64; number of values = K; nullability: non-null.
    * Absolute offsets of contiguous data pages, including headers, excluding
    * dictionaries. Chunks need not be adjacent or in byte-offset order.
    */
   7: required StreamLocation offsets;
 
-  /** list<i64>; number of values = K; nullability: non-null.
+  /** INT64; number of values = K; nullability: non-null.
    * Stored data-page bytes, excluding dictionaries; non-negative, zero iff
    * no data pages. [offsets[k], offsets[k]+compressed_size[k]) extents are
    * disjoint when nonempty. Check file bounds and overflow; never infer size
@@ -152,13 +150,13 @@ struct ColumnChunkMetadata {
 
 /** Independently optional streams sharing DataLayout.page_index; omit if both absent. */
 struct PageMetadata {
-  /** list<i64>; number of values = P; nullability: non-null.
+  /** INT64; number of values = P; nullability: non-null.
    * Absolute first rows; required for any PAGE statistics, including encrypted
    * statistics. If absent, obtain row positions from source-data pages.
    */
   1: optional StreamLocation first_row_index;
 
-  /** list<i64>; number of values = P; nullability: non-null.
+  /** INT64; number of values = P; nullability: non-null.
    * Relative to ColumnChunkMetadata.offsets[k]. Start at 0 in each nonempty
    * chunk and strictly increase below compressed_size[k]; last page ends at
    * the chunk end. Retain the first zero, including for single-page chunks.
@@ -178,43 +176,43 @@ enum RowRangeKind {
  * Null values or omitted statistics streams mean unknown, including all-nullness.
  */
 struct RangeStatistics {
-  /** list<i64>; number of values = S; nullability: non-null.
+  /** INT64; number of values = S; nullability: non-null.
    * Absolute first rows; present iff range_kind is ARBITRARY. Per column,
    * start at 0 and strictly increase below FileInfo.num_rows. End at the next
    * start or FileInfo.num_rows; alignment with chunks/pages/row groups is optional.
    */
   1: optional StreamLocation range_start_rows;
 
-  /** list<bool>; number of values = S; nullability: nullable.
+  /** BOOLEAN; number of values = S; nullability: nullable.
    * True: at least one null; false: no nulls.
    */
   2: optional StreamLocation contains_null;
 
-  /** list<bool>; number of values = S; nullability: nullable.
+  /** BOOLEAN; number of values = S; nullability: nullable.
    * True: at least one NaN; false: no NaNs. NaN is not null.
    */
   3: optional StreamLocation contains_nan;
 
-  /** list<bool>; number of values = S; nullability: nullable.
+  /** BOOLEAN; number of values = S; nullability: nullable.
    * True: only nulls; false: at least one non-null value.
    */
   4: optional StreamLocation is_all_null;
 
-  /** list<i64>; number of values = S; nullability: nullable. */
+  /** INT64; number of values = S; nullability: nullable. */
   5: optional StreamLocation distinct_counts;
 
   /** Bound streams: [min_0, max_0, min_1, max_1, ...]; values independently nullable.
    * Wrong physical type or unavailable bound means null. Pairs may cross
    * metadata-page boundaries.
    */
-  6: optional StreamLocation min_max_boolean; // list<bool>; number of values = 2S.
-  7: optional StreamLocation min_max_int32; // list<i32>; number of values = 2S.
-  8: optional StreamLocation min_max_int64; // list<i64>; number of values = 2S.
-  9: optional StreamLocation min_max_float; // list<float>; number of values = 2S.
-  10: optional StreamLocation min_max_double; // list<double>; number of values = 2S.
-  11: optional StreamLocation min_max_byte_array; // list<binary>; number of values = 2S.
+  6: optional StreamLocation min_max_boolean; // BOOLEAN; number of values = 2S.
+  7: optional StreamLocation min_max_int32; // INT32; number of values = 2S.
+  8: optional StreamLocation min_max_int64; // INT64; number of values = 2S.
+  9: optional StreamLocation min_max_float; // FLOAT; number of values = 2S.
+  10: optional StreamLocation min_max_double; // DOUBLE; number of values = 2S.
+  11: optional StreamLocation min_max_byte_array; // BYTE_ARRAY; number of values = 2S.
 
-  /** list<bool>; number of values = 2S; nullability: nullable.
+  /** BOOLEAN; number of values = 2S; nullability: nullable.
    * Aligned with paired bounds: true=exact, false=inexact, null=unknown.
    * An unavailable bound requires null exactness.
    */
@@ -241,7 +239,7 @@ struct RangeStatistics {
  * zero ranges per column via equal column_range_starts.
  */
 struct SharedRangeStatistics {
-  /** list<i64>; number of values = C+1; nullability: non-null.
+  /** INT64; number of values = C+1; nullability: non-null.
    * Present iff statistics.range_kind is ARBITRARY. Non-decreasing, from 0 to S.
    * Column c owns [index[c], index[c+1]); equal ends mean no ranges.
    */
@@ -253,7 +251,7 @@ struct SharedRangeStatistics {
    */
   2: required RangeStatistics statistics;
 
-  /** list<i32>; number of values = C; nullability: non-null.
+  /** INT32; number of values = C; nullability: non-null.
    * parquet.BoundaryOrder per column. Columns without shared statistics must
    * be UNORDERED; omission means all UNORDERED.
    */
@@ -292,10 +290,10 @@ struct ModularFooterV2 {
    */
   8: optional list<SharedRangeStatistics> row_range_statistics;
 
-  /** list<binary>; number of values = M; nullability: non-null. */
+  /** BYTE_ARRAY; number of values = M; nullability: non-null. */
   9: optional StreamLocation key_value_metadata_keys;
 
-  /** list<binary>; number of values = M; nullability: nullable. Aligned with keys. */
+  /** BYTE_ARRAY; number of values = M; nullability: nullable. Aligned with keys. */
   10: optional StreamLocation key_value_metadata_values;
 
   /** Algorithm/AAD parameters and opaque footer-key metadata.
