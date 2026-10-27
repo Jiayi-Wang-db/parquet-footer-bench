@@ -431,7 +431,7 @@ def report(a):
         timing_tables.append('')
     section=['## Size and decoding comparison','',
         'The benchmark compares the proposed stream representation with the existing Parquet Compact-Thrift footer and the modular footer on the same 12 datasets. All three implementations are interleaved in each timing run. Metadata is encoded without Zstd. The benchmark implementation uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.','',
-        'Benchmark scope: the tables use the [benchmark directory schema](ExplicitIndexFooter.thrift). They measure the stream representation, but do not establish exact sizes or decoding times for the proposed directory serialization. Encryption and column sets are not measured.','',
+        'Benchmark scope: the tables use the [benchmark schema](ExplicitIndexFooter.thrift) and measure placement and pruning predicates. Exact-count statistics, the proposed directory serialization, encryption, and column sets are outside the measured scope.','',
         '### Size','',
         'All values are bytes of complete metadata at each cumulative scope, including schema, directories, page headers, required external indexes, and trailer. Each table includes every dataset in the corpus.','']+size_tables
     core={variant:sum(r[variant] for r in baseline if r['scope']==0) for variant in ('current','modular')}

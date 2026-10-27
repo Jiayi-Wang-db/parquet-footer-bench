@@ -174,6 +174,7 @@ enum RowRangeKind {
 
 /** S ranges for one granularity; the containing struct defines column ownership.
  * Null values or omitted statistics streams mean unknown, including all-nullness.
+ * Counts are non-negative. When known, null_count + nan_count <= num_values.
  */
 struct RangeStatistics {
   /** INT64; number of values = S; nullability: non-null.
@@ -183,20 +184,20 @@ struct RangeStatistics {
    */
   1: optional StreamLocation first_row_indexes;
 
-  /** BOOLEAN; number of values = S; nullability: nullable.
-   * True: at least one null; false: no nulls.
+  /** INT64; number of values = S; nullability: nullable.
+   * Number of null values per range.
    */
-  2: optional StreamLocation contains_null;
+  2: optional StreamLocation null_count;
 
-  /** BOOLEAN; number of values = S; nullability: nullable.
-   * True: at least one NaN; false: no NaNs. NaN is not null.
+  /** INT64; number of values = S; nullability: nullable.
+   * Number of NaN values per range. NaNs are non-null values.
    */
-  3: optional StreamLocation contains_nan;
+  3: optional StreamLocation nan_count;
 
-  /** BOOLEAN; number of values = S; nullability: nullable.
-   * True: only nulls; false: at least one non-null value.
+  /** INT64; number of values = S; nullability: nullable.
+   * Total data values per range, including nulls and NaNs; not a row count.
    */
-  4: optional StreamLocation is_all_null;
+  4: optional StreamLocation num_values;
 
   /** INT64; number of values = S; nullability: nullable. */
   5: optional StreamLocation distinct_counts;

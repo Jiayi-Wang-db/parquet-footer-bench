@@ -109,7 +109,9 @@ enum RowRangeKind {
 
 Only `ARBITRARY` stores the additional index and row starts. `column_range_starts` has `C + 1` non-null `INT64` entries; equal adjacent entries mean a column has no ranges in that set. Chunk statistics require `ColumnChunkMetadata.first_row_indexes`, so reading them does not require page metadata. Page statistics require page-row metadata but do not require page offsets.
 
-For the positional tags, missing statistics retain their positions as unknown values. A column with unavailable or independently encrypted statistics must not shift another column's positions. An entire unavailable leaf stream can be omitted. Scalar flags and distinct counts have one nullable value per range. Typed min/max streams contain paired values `[min_0, max_0, min_1, max_1, ...]`, with `2S` positions; exactness flags use the same pairing. A range's entries in other physical-type streams are null.
+For the positional tags, missing statistics retain their positions as unknown values. A column with unavailable or independently encrypted statistics must not shift another column's positions. An entire unavailable leaf stream can be omitted. `null_count`, `nan_count`, `num_values`, and `distinct_counts` each have one nullable `INT64` value per range. Typed min/max streams contain paired values `[min_0, max_0, min_1, max_1, ...]`, with `2S` positions; exactness flags use the same pairing. A range's entries in other physical-type streams are null.
+
+`num_values` counts data values, including nulls and NaNs; it is not a row count. Counts are non-negative, and known counts must satisfy `null_count + nan_count <= num_values`. Null or omitted counts mean unknown, not zero. Null/NaN presence follows from a positive count; `null_count == num_values` means no non-null values when both counts are known.
 
 Row positions are absolute within the file. For a column with usable statistics, each set describes nonempty, row-aligned ranges partitioning `[0, num_rows)`. A range ends at the next start in that column, or at `num_rows`. Chunk membership and value counts do not establish row coverage. The positional tags apply only when the chunk/page boundaries satisfy this rule. A page splitting a source row cannot use the `PAGE` tag under this contract. Sparse coverage needs valid row-range statistics with unknown entries covering gaps, or an omitted set; changing the tag alone does not make existing bounds valid.
 
@@ -146,7 +148,7 @@ Protected modes authenticate the visible directory and independently protect sha
 
 Readers validate index lengths, monotonicity, terminal counts, data/dictionary extents, dictionary ID bounds and ownership, and the positional invariants before use. Dictionary references must belong to one physical column and use compatible decoding. Check offset/length sums without integer overflow. Unsupported required format versions or encodings cannot be guessed. Unknown optional fields can be skipped; an unknown statistics tag makes that set unsupported, not equivalent to another tag.
 
-Compared with the current modular footer, the proposed statistics schema uses null/NaN presence and all-null flags instead of exact null/NaN counts, and does not carry `SchemaModule.column_orders` or an equivalent of the optional `SchemaIndexModule`. Its single nullable dictionary ID also narrows the current placement schema's ability to list multiple dictionaries per chunk. These are compatibility decisions to resolve before adoption. Histograms are also outside the proposal; these omissions prevent lossless conversion of every modular or PAR1 metadata field.
+The proposal does not carry `SchemaModule.column_orders` or an equivalent of the optional `SchemaIndexModule`. Its single nullable dictionary ID also narrows the current placement schema's ability to list multiple dictionaries per chunk. These are compatibility decisions to resolve before adoption. Histograms are also outside the proposal; these omissions prevent lossless conversion of every modular or PAR1 metadata field.
 
 The public encoding profile, format version, and protection identifiers require allocation before interoperable implementation.
 
@@ -164,7 +166,7 @@ Smaller sets reduce metadata fetched for narrow projections but add descriptors 
 
 The benchmark compares the proposed stream representation with the existing Parquet Compact-Thrift footer and the modular footer on the same 12 datasets. All three implementations are interleaved in each timing run. Metadata is encoded without Zstd. The benchmark implementation uses direct offsets, a dictionary table, and cumulative-end indexes with an implicit initial zero.
 
-Benchmark scope: the tables use the [benchmark directory schema](ExplicitIndexFooter.thrift). They measure the stream representation, but do not establish exact sizes or decoding times for the proposed directory serialization. Encryption and column sets are not measured.
+Benchmark scope: the tables use the [benchmark schema](ExplicitIndexFooter.thrift) and measure placement and pruning predicates. Exact-count statistics, the proposed directory serialization, encryption, and column sets are outside the measured scope.
 
 ### Size
 
