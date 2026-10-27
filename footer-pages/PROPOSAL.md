@@ -70,7 +70,7 @@ compressed_size:       [200, 100, 300]
 dictionary_ids:        [0, 0, null]
 dictionary_metadata.offsets: [800]
 dictionary_metadata.lengths: [100]
-relative_page_offsets: [0, 100, 0, 0, 200]
+relative_offset:       [0, 100, 0, 0, 200]
 column_chunk_metadata.first_row_index: [0, 100, 0]
 page_metadata.first_row_index: [0, 50, 100, 0, 80]
 ```
@@ -83,7 +83,7 @@ The equivalent logical page-offset grouping is `[[[0, 100], [0]], [[0, 200]]]`. 
 
 `DictionaryMetadata.offsets` and `DictionaryMetadata.lengths` form a table with `D` non-null `i64` values in each stream. Entry `d` locates one complete dictionary page, including its header. `ColumnChunkMetadata.dictionary_ids` has `K` nullable `i32` values: null means no dictionary; otherwise the ID is in `[0,D)`. Several chunks of the same physical column may reference one entry, provided their dictionary decoding is compatible. Cross-column dictionary sharing is not permitted. Table entries are stored once and need not follow file order; assigning IDs in first-reference order is a writer choice that encoded well in the prototype. With no dictionaries, both table streams are empty and all chunk IDs are null.
 
-`PageMetadata.relative_page_offsets` contains one non-null `i64` per page, relative to its chunk's `offsets[k]`. The first offset of each nonempty chunk is zero. A page ends at the next page offset in that chunk, or at `offsets[k] + compressed_size[k]` for the last page.
+`PageMetadata.relative_offset` contains one non-null `i64` per page, relative to its chunk's `offsets[k]`. The first offset of each nonempty chunk is zero. A page ends at the next page offset in that chunk, or at `offsets[k] + compressed_size[k]` for the last page.
 
 The page-offset and page-row streams are independently optional. Each present stream has exactly `P` positions; the offset stream includes the zero for a single-page chunk. A reader that knows a chunk has one page can derive its byte extent from the chunk's offset and length without reading that offset. Omitting the first offset from storage would require remapping page positions for the shorter offset array, including handling empty chunks; this draft keeps those positions aligned with other page fields. `page_index` is required whenever `PageMetadata` is present. PAGE statistics require `PageMetadata.first_row_index`; omit `PageMetadata` when both streams are absent.
 
@@ -126,8 +126,8 @@ a, b = boundary(column_chunk_index, c), column_chunk_index[c]
 k = a + j                         # require 0 <= j < b - a
 x, y = boundary(page_index, k), page_index[k]
 p = x + q                         # require 0 <= q < y - x
-start = offsets[k] + relative_page_offsets[p]
-end = offsets[k] + relative_page_offsets[p + 1]  if p + 1 < y
+start = offsets[k] + relative_offset[p]
+end = offsets[k] + relative_offset[p + 1]        if p + 1 < y
       offsets[k] + compressed_size[k]          otherwise
 
 d = dictionary_ids[k]

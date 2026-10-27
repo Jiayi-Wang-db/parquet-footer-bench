@@ -38,7 +38,7 @@
  *   dictionary_metadata.offsets: [800]
  *   dictionary_metadata.lengths: [100]
  *   page_index:            [2, 3, 5]
- *   relative_page_offsets: [0, 100, 0, 0, 200]
+ *   relative_offset:       [0, 100, 0, 0, 200]
  *   page_metadata.first_row_index: [0, 50, 100, 0, 80]
  * C = column_chunk_index.length, checked against FileInfo.num_columns.
  * K = column_chunk_index[C-1] when C>0, otherwise 0.
@@ -56,7 +56,7 @@
  *   message dictionary_ids { optional int32 value; }
  *   message offsets { required int64 value; } // DictionaryMetadata.offsets
  *   message lengths { required int64 value; } // DictionaryMetadata.lengths
- *   message relative_page_offsets { required int64 value; }
+ *   message relative_offset { required int64 value; }
  *   message first_row_index { required int64 value; } // PageMetadata.first_row_index
  *
  * Readers validate lengths, monotonic indexes and terminal counts. Authenticate
@@ -233,7 +233,7 @@ struct PageMetadata {
    * Nullability: list and values are non-null. No repetition/definition levels.
    * Absolute first-row indexes, grouped by DataLayout.page_index.
    * Required for PAGE statistics, including independently encrypted statistics.
-   * Otherwise optional, independently of relative_page_offsets. If absent,
+   * Otherwise optional, independently of relative_offset. If absent,
    * read source-data pages to determine row positions. Chunk membership and
    * num_values do not supply row positions.
    */
@@ -248,7 +248,7 @@ struct PageMetadata {
    * for a single-page chunk, so positions align with other page fields.
    * If absent, locating interior pages requires scanning source-data page headers.
    */
-  2: optional StreamLocation relative_page_offsets;
+  2: optional StreamLocation relative_offset;
 }
 
 /** How one statistics set obtains its row ranges. */
@@ -490,7 +490,7 @@ struct FileInfo {
  * Stream paths contain Thrift field IDs and zero-based list positions from the
  * root: [6,7] identifies ColumnChunkMetadata.offsets;
  * [4,1] identifies DictionaryMetadata.offsets;
- * [7,2] identifies relative_page_offsets; [8,g,2,7] identifies granularity g's
+ * [7,2] identifies relative_offset; [8,g,2,7] identifies granularity g's
  * min_max_int32. The schema distinguishes field IDs from list positions.
  * Numeric module-type allocations are pending; do not reuse existing PME IDs.
  *
