@@ -49,12 +49,12 @@ Let `C` be the number of physical columns, `K` the total number of chunks, and `
 
 | Field | Type and number of values | Nullability | Meaning |
 |---|---|---|---|
-| `column_chunk_index` | `list<i32>`, `C + 1` | Non-null | Column `c` owns chunks `[index[c], index[c+1])`. |
-| `page_index` | `list<i32>`, `K + 1` | Non-null | Chunk `k` owns pages `[index[k], index[k+1])`. |
+| `column_chunk_index` | `list<i32>`, `C` | Non-null | Column `c` ends at `index[c]`; starts at `0` if `c = 0`, otherwise `index[c-1]`. |
+| `page_index` | `list<i32>`, `K` | Non-null; stream optional | Chunk `k` ends at `index[k]`; starts at `0` if `k = 0`, otherwise `index[k-1]`. |
 | Chunk-level fields | `list<T>`, `K` | Defined per field | Ordered by column, then chunk. |
 | Page-level fields | `list<T>`, `P` | Defined per field | Ordered by flattened chunk, then page. |
 
-Both indexes are nondecreasing prefixes starting at zero; their final entries are `K` and `P`. Equal adjacent entries represent an empty column or a chunk with no pages. Counts follow from adjacent differences, so separate count arrays are unnecessary. `K` and `P` must fit in signed `i32`.
+Both indexes store nondecreasing cumulative ends, with the initial zero implicit. When nonempty, their final entries are `K` and `P`. An empty column index means `C = K = 0`; an empty, present page index means `K = P = 0`. An absent page index does not imply zero pages. Repeated ends represent an empty column or a chunk with no pages; a first entry of zero represents an empty first column or chunk and must still be stored. Counts are the current end minus the previous end, taking the previous end as zero for the first entry. `K` and `P` must fit in signed `i32`.
 
 Columns may have different chunk counts, including zero. There is no requirement that every column have one chunk per row group. Optional row-group metadata describes layouts that use row groups; it does not define the chunk index.
 
@@ -63,8 +63,8 @@ All fields in a domain preserve the same logical positions. For example, a chunk
 Example: two columns with two and one chunks, containing five pages in total:
 
 ```text
-column_chunk_index:    [0, 2, 3]
-page_index:            [0, 2, 3, 5]
+column_chunk_index:    [2, 3]
+page_index:            [2, 3, 5]
 data_offsets:          [1000, 1400, 2000]
 data_lengths:          [200, 100, 300]
 dictionary_ids:        [0, 0, null]
@@ -120,9 +120,11 @@ PAR1 row-group statistics normally map to `COLUMN_CHUNK`; row-aligned page stati
 A reader first obtains the footer directory and resolves the requested columns from the source schema. For zero-based column `c`, local chunk `j`, and local page `q`, it uses:
 
 ```text
-a, b = column_chunk_index[c], column_chunk_index[c + 1]
+boundary(index, n) = 0 if n == 0 else index[n - 1]
+
+a, b = boundary(column_chunk_index, c), column_chunk_index[c]
 k = a + j                         # require 0 <= j < b - a
-x, y = page_index[k], page_index[k + 1]
+x, y = boundary(page_index, k), page_index[k]
 p = x + q                         # require 0 <= q < y - x
 start = data_offsets[k] + relative_page_offsets[p]
 end = data_offsets[k] + relative_page_offsets[p + 1]  if p + 1 < y
@@ -132,7 +134,7 @@ d = dictionary_ids[k]
 dictionary = none if d is null else (dictionary_offsets[d], dictionary_lengths[d])
 ```
 
-The same chunk/page positions address codecs, row positions, and tagged statistics. No hierarchy levels need to be scanned or reconstructed.
+Here `boundary(index, n)` accepts `0 <= n <= length(index)` and never reads `index[-1]` for `n = 0`. For valid column `c`, chunk statistics occupy `[a,b)` and page statistics occupy `[boundary(page_index,a), boundary(page_index,b))`, including empty columns. The same chunk/page positions address codecs, row positions, and tagged statistics. No hierarchy levels need to be scanned or reconstructed.
 
 These formulas identify logical positions after the necessary index values have been decoded. The format does not store a byte-offset directory for every metadata page. A reader can scan page headers, accumulate their value counts, and cache a directory for locating an encoded range. The selected encoding may still require decoding preceding values within a block or decompressing a page. Protected streams must also be authenticated according to their protection unit before use. Explicit indexes therefore remove hierarchy reconstruction, but do not promise constant-time file access.
 
@@ -173,4 +175,4 @@ Smaller sets reduce metadata fetched for narrow projections but add descriptors 
 
 ## Supporting material
 
-The [full IDL](ExplicitIndexFooter.thrift) defines every field's type, value count, nullability, and dependencies. Local historical measurements compare [V31 explicit indexes](legacy/ExplicitIndexFooterV31.thrift) and [V32 nested layouts](ImplicitLevelsFooter.thrift), both using region maps, alongside the [current modular footer baseline](../modular-footer/ModularFooter.thrift). They support the selective-read recommendation for explicit indexes over nested levels; their timings do not measure this direct-offset revision. The [direct-offset size results](DIRECT-OFFSETS.md) compare the chosen representation with both region-map and modular cores. Production encryption, direct-offset decoding-speed measurements, and a public interoperability test suite remain outside the validated scope.
+The [full IDL](ExplicitIndexFooter.thrift) defines every field's type, value count, nullability, and dependencies. Local historical measurements compare [V31 explicit indexes](legacy/ExplicitIndexFooterV31.thrift) and [V32 nested layouts](ImplicitLevelsFooter.thrift), both using region maps, alongside the [current modular footer baseline](../modular-footer/ModularFooter.thrift). They support the selective-read recommendation for explicit indexes over nested levels; their timings do not measure this direct-offset revision. The [direct-offset size results](DIRECT-OFFSETS.md) use [V35](legacy/ExplicitIndexFooterV35.thrift), which stored the leading zero in both hierarchy indexes; they have not been rerun for this cumulative-end revision. Production encryption, direct-offset decoding-speed measurements, and a public interoperability test suite remain outside the validated scope.

@@ -3,7 +3,7 @@
  * Reuses the explicit-index proposal's fields and encodings. Row-group
  * descriptors and encryption are outside this experiment.
  */
-include "../ExplicitIndexFooter.thrift"
+include "ExplicitIndexFooterV35.thrift"
 namespace cpp parquet.columnsets
 
 /** One contiguous range of physical columns, independently fetchable.
@@ -34,10 +34,10 @@ struct ColumnSetLocation {
  * Null slots and empty columns/chunks keep the existing explicit-index rules.
  */
 struct ColumnSetMetadata {
-  3: required ExplicitIndexFooter.DataLayout data_layout;
-  4: required ExplicitIndexFooter.DataLocation data_location;
-  6: required ExplicitIndexFooter.ColumnChunkMetadata column_chunk_metadata;
-  7: optional ExplicitIndexFooter.PageMetadata page_metadata;
+  3: required ExplicitIndexFooterV35.DataLayout data_layout;
+  4: required ExplicitIndexFooterV35.DataLocation data_location;
+  6: required ExplicitIndexFooterV35.ColumnChunkMetadata column_chunk_metadata;
+  7: optional ExplicitIndexFooterV35.PageMetadata page_metadata;
   8: required binary page_streams;
 }
 
@@ -50,7 +50,7 @@ struct ColumnSetMetadata {
  * Omit an entirely unavailable block via ColumnSetLocation's optional fields.
  */
 struct ColumnSetStatistics {
-  1: required list<ExplicitIndexFooter.ColumnRangeStatistics> row_range_statistics;
+  1: required list<ExplicitIndexFooterV35.ColumnRangeStatistics> row_range_statistics;
   2: required binary page_streams;
 }
 
@@ -63,6 +63,6 @@ struct ColumnSetStatistics {
  */
 struct ColumnSetFooter {
   1: required i32 version;
-  2: required ExplicitIndexFooter.FileInfo file_info;
+  2: required ExplicitIndexFooterV35.FileInfo file_info;
   3: required list<ColumnSetLocation> column_sets;
 }

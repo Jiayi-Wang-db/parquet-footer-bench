@@ -1,10 +1,11 @@
 /** Standalone draft: explicit indexes for the column -> chunk -> page hierarchy.
  * All proposal types are local; parquet.thrift supplies standard Parquet types.
- * V35 combines direct chunk offsets/lengths, a dictionary table, and the V31
- * shared indexes and tagged statistics. It replaces V31's region map; these
- * versions are not wire-compatible. See legacy/ExplicitIndexFooterV31.thrift
- * for the historical measurements. Encryption remains schema-only.
- * V35 is a repository-local experiment, not a public format allocation.
+ * V38 stores only cumulative ends in column_chunk_index and page_index; their
+ * initial zero is implicit. It retains V35's direct chunk offsets/lengths,
+ * dictionary table and tagged statistics. V35 stored a leading zero in both
+ * indexes; use legacy/ExplicitIndexFooterV35.thrift for its measured artifacts.
+ * These versions are not wire-compatible. Encryption remains schema-only.
+ * V38 is a repository-local experiment, not a public format allocation.
  *
  * C = physical columns; K_c = chunks in column c; K = sum(K_c).
  * P_k = data pages in chunk k; P = sum(P_k); D = dictionaries; G = row groups.
@@ -31,18 +32,21 @@
  * Paired min/max streams have two values per range; their positions are 2r and 2r+1.
  *
  * Example: C=2, K=3, P=5; columns have 2 and 1 chunks.
- *   column_chunk_index:    [0, 2, 3]
+ *   column_chunk_index:    [2, 3]
  *   data_offsets:          [1000, 1400, 2000]
  *   data_lengths:          [200, 100, 300]
  *   dictionary_ids:        [0, 0, null]
  *   dictionary_offsets:    [800]
  *   dictionary_lengths:    [100]
- *   page_index:            [0, 2, 3, 5]
+ *   page_index:            [2, 3, 5]
  *   relative_page_offsets: [0, 100, 0, 0, 200]
  *   page_first_rows:       [0, 50, 100, 0, 80]
- * C = column_chunk_index.length - 1, checked against FileInfo.num_columns.
- * K = column_chunk_index[C] = page_index.length - 1.
- * P = page_index[K]. Equal adjacent index entries represent an empty list.
+ * C = column_chunk_index.length, checked against FileInfo.num_columns.
+ * K = column_chunk_index[C-1] when C>0, otherwise 0.
+ * When page_index is present, its length is K and P is its last value,
+ * or 0 when K=0. Never infer P from an absent page_index when K>0.
+ * Each range starts at the previous end, or 0 for the first range.
+ * Equal adjacent ends (including the implicit 0) represent an empty list.
  * Each nonempty chunk retains its first relative page offset, 0.
  *
  * Equivalent per-stream Parquet schemas (illustrative, not serialized):
@@ -87,21 +91,23 @@ struct StreamLocation {
   3: required parquet.CompressionCodec codec;
 }
 
-/** Shared hierarchy indexes; values are element positions, not file offsets.
+/** Shared hierarchy indexes; values are exclusive element ends, not file offsets.
  * K and P must fit in signed i32. All index values are non-negative.
+ * The fixed leading zero is implicit in both indexes; genuine zero ends remain.
+ * boundary(index, n) = 0 when n=0, otherwise index[n-1], for 0<=n<=length.
  */
 struct DataLayout {
-  /** list<i32>; number of values = C+1.
+  /** list<i32>; number of values = C.
    * Nullability: list and values are non-null.
-   * Non-decreasing, starting at 0 and ending at K.
-   * Column c owns chunks [column_chunk_index[c], column_chunk_index[c+1]).
+   * Non-decreasing cumulative ends; last value is K. Empty when C=0, then K=0.
+   * Column c owns chunks [boundary(column_chunk_index,c), column_chunk_index[c]).
    */
   1: required StreamLocation column_chunk_index;
 
-  /** list<i32>; number of values = K+1.
+  /** list<i32>; number of values = K.
    * Nullability: list and values are non-null.
-   * Non-decreasing, starting at 0 and ending at P.
-   * Chunk k owns pages [page_index[k], page_index[k+1]).
+   * Non-decreasing cumulative ends; last value is P. Empty when K=0, then P=0.
+   * Chunk k owns pages [boundary(page_index,k), page_index[k]).
    * Required when relative_page_offsets or page_metadata is present.
    * PAGE statistics require page_metadata and therefore this index.
    * Otherwise it may be omitted; source page headers then supply page grouping.
@@ -361,9 +367,10 @@ struct ColumnRangeStatistics {
   /** S range positions. Scalar statistics have S entries; paired bounds and
    * exactness have 2S entries. Range r's bounds occupy [2r, 2r+2).
    * Unknown statistics retain their positions as nulls or omitted leaf streams.
-   * Let a=column_chunk_index[c], b=column_chunk_index[c+1].
+   * Use boundary(index,n) from DataLayout (implicit zero at n=0).
+   * Let a=boundary(column_chunk_index,c), b=column_chunk_index[c].
    * COLUMN_CHUNK: column c owns ranges [a,b), with S=K.
-   * PAGE: column c owns ranges [page_index[a],page_index[b]), with S=P.
+   * PAGE: column c owns [boundary(page_index,a),boundary(page_index,b)), S=P.
    * ARBITRARY: use column_range_starts; S is its last entry.
    */
   2: required RangeStatistics statistics;
@@ -485,7 +492,7 @@ struct FileInfo {
  * expected protection policy; stripping crypto metadata must not downgrade a file.
  */
 struct ExplicitIndexFooter {
-  1: required i32 version; // Experiment V35; reject V31 region-map interpretation.
+  1: required i32 version; // Experiment V38; reject V35 leading-zero indexes and V31 regions.
 
   /** Exactly one of file_info and encrypted_file_info must be present. */
   2: optional FileInfo file_info;

@@ -5,7 +5,7 @@ Modular Footer V2 stores metadata arrays as typed Parquet page streams, with a s
 | Start here | Contents |
 |---|---|
 | [Design proposal for review](PROPOSAL.md) | Flexible layouts, direct chunk locations, a dictionary table, shared explicit indexes, and tagged row-range statistics; column sets are an optional future extension. |
-| [Explicit-index definition](ExplicitIndexFooter.thrift) | V35 standalone draft; dictionary reuse stays within one column, and page offsets remain chunk-relative. |
+| [Explicit-index definition](ExplicitIndexFooter.thrift) | V38 stores cumulative ends with an implicit initial zero in the two hierarchy indexes; dictionaries stay within one column and page offsets remain chunk-relative. |
 | [Optional column-set prototype](ColumnSetFooter.thrift) | V37 explores logical grouping for very wide files with independently located streams. Outside the base proposal; membership encoding remains open. |
 | [Direct-offset size results](DIRECT-OFFSETS.md) | Core size comparison, validation, and archived region-map definitions. |
 | [Playground guide](PLAYGROUND.md) | V2 design → Raincloud setup → tested datasets → four size levels → codec implementations → decoding tests → layout/encoding experiments → result recording. |

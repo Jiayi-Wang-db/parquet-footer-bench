@@ -3,10 +3,11 @@
  * No public wire-version allocation.
  * Every set's stream descriptors are inline in the common footer directory.
  * Each stream is independently located; sets impose no byte-contiguity rule.
- * Reuses the explicit-index proposal's fields and encodings. Row-group
- * descriptors and encryption are outside this experiment.
+ * Pinned to V35's leading-zero indexes; the current base draft uses cumulative
+ * ends with an implicit initial zero. Row-group descriptors and encryption
+ * are outside this experiment.
  */
-include "ExplicitIndexFooter.thrift"
+include "legacy/ExplicitIndexFooterV35.thrift"
 namespace cpp parquet.columnsets
 
 /** One contiguous range of complete physical columns. Entries are ordered and
@@ -25,10 +26,10 @@ namespace cpp parquet.columnsets
 struct ColumnSetMetadata {
   1: required i32 first_column;
   2: required i32 num_columns;
-  3: required ExplicitIndexFooter.DataLayout data_layout;
-  4: required ExplicitIndexFooter.DataLocation data_location;
-  6: required ExplicitIndexFooter.ColumnChunkMetadata column_chunk_metadata;
-  7: optional ExplicitIndexFooter.PageMetadata page_metadata;
+  3: required ExplicitIndexFooterV35.DataLayout data_layout;
+  4: required ExplicitIndexFooterV35.DataLocation data_location;
+  6: required ExplicitIndexFooterV35.ColumnChunkMetadata column_chunk_metadata;
+  7: optional ExplicitIndexFooterV35.PageMetadata page_metadata;
 
   /** Statistics descriptors for this same column range, inline in the directory.
    * Each leaf is an independently fetchable stream. COLUMN_CHUNK/PAGE keep
@@ -39,7 +40,7 @@ struct ColumnSetMetadata {
    * require fetching statistics payloads. Decoding one leaf's values does
    * not require sibling leaves; interpreting ranges requires shared metadata.
    */
-  8: optional list<ExplicitIndexFooter.ColumnRangeStatistics> row_range_statistics;
+  8: optional list<ExplicitIndexFooterV35.ColumnRangeStatistics> row_range_statistics;
 }
 
 /** Tail: [independently located streams][Compact-Thrift root]
@@ -56,6 +57,6 @@ struct ColumnSetMetadata {
  */
 struct ColumnSetFooter {
   1: required i32 version;
-  2: required ExplicitIndexFooter.FileInfo file_info;
+  2: required ExplicitIndexFooterV35.FileInfo file_info;
   3: required list<ColumnSetMetadata> column_sets;
 }
