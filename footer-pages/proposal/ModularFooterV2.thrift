@@ -7,8 +7,9 @@
  *
  * For StreamLocation fields, list<T> in comments describes the decoded sequence
  * of T values, stored in Parquet pages. The Thrift field contains only the
- * stream's offset, length and codec. Fields declared as list<T> in Thrift
- * store inline Thrift lists.
+ * stream's offset, length and codec.
+ * FileInfo.schema is declared list<parquet.SchemaElement> and stores the
+ * schema elements directly in FileInfo.
  * i32/i64/bool/binary map to INT32/INT64/BOOLEAN/BYTE_ARRAY;
  * float/double map to FLOAT/DOUBLE. Field IDs define types; no stream schema
  * is serialized. FileInfo.schema describes the source data.
