@@ -35,8 +35,8 @@
  *   data_offsets:          [1000, 1400, 2000]
  *   data_lengths:          [200, 100, 300]
  *   dictionary_ids:        [0, 0, null]
- *   dictionary_offsets:    [800]
- *   dictionary_lengths:    [100]
+ *   dictionary_metadata.offsets: [800]
+ *   dictionary_metadata.lengths: [100]
  *   page_index:            [2, 3, 5]
  *   relative_page_offsets: [0, 100, 0, 0, 200]
  *   page_first_rows:       [0, 50, 100, 0, 80]
@@ -54,8 +54,8 @@
  *   message data_offsets { required int64 value; }
  *   message data_lengths { required int64 value; }
  *   message dictionary_ids { optional int32 value; }
- *   message dictionary_offsets { required int64 value; }
- *   message dictionary_lengths { required int64 value; }
+ *   message offsets { required int64 value; } // DictionaryMetadata.offsets
+ *   message lengths { required int64 value; } // DictionaryMetadata.lengths
  *   message relative_page_offsets { required int64 value; }
  *   message page_first_rows { required int64 value; }
  *
@@ -127,16 +127,15 @@ struct DictionaryMetadata {
    * First-reference table order is recommended for compact dictionary IDs.
    * Both table streams have zero values when no chunk uses a dictionary.
    */
-  1: required StreamLocation dictionary_offsets;
+  1: required StreamLocation offsets;
 
   /** list<i64>; number of values = D.
    * Nullability: list and values are non-null; all lengths are positive.
    * Stored byte lengths, including the dictionary page header and body.
-   * Dictionary d occupies [dictionary_offsets[d],
-   * dictionary_offsets[d] + dictionary_lengths[d]).
+   * Dictionary d occupies [offsets[d], offsets[d] + lengths[d]).
    * Extents are disjoint from data extents and other dictionary entries.
    */
-  2: required StreamLocation dictionary_lengths;
+  2: required StreamLocation lengths;
 }
 
 struct RowGroupMetadata {
@@ -144,7 +143,7 @@ struct RowGroupMetadata {
    * Nullability: list and values are non-null.
    * Row counts in row-group order; counts sum to FileInfo.num_rows.
    */
-  1: required StreamLocation row_group_num_rows;
+  1: required StreamLocation num_rows;
 
   /** list<i64>; number of values = G+1.
    * Nullability: list and values are non-null.
@@ -153,7 +152,7 @@ struct RowGroupMetadata {
    * shared across row groups when a complete row-group extent cannot be given.
    * Readers use chunk and dictionary locations independently of this hint.
    */
-  2: optional StreamLocation row_group_offsets;
+  2: optional StreamLocation offsets;
 }
 
 /** Flat fields grouped by DataLayout.column_chunk_index. */
@@ -488,7 +487,7 @@ struct FileInfo {
  *           + LE32(each path component) + LE64(offset) + LE64(length) + LE32(codec).
  *   column stats: file AAD + NEW_ROW_RANGE_STATISTICS_TYPE + LE32(version) + LE32(column ordinal).
  * Stream paths contain Thrift field IDs and zero-based list positions from the
- * root: [6,7] identifies data_offsets; [4,1] identifies dictionary_offsets;
+ * root: [6,7] identifies data_offsets; [4,1] identifies DictionaryMetadata.offsets;
  * [7,2] identifies relative_page_offsets; [8,g,2,7] identifies granularity g's
  * min_max_int32. The schema distinguishes field IDs from list positions.
  * Numeric module-type allocations are pending; do not reuse existing PME IDs.

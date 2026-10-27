@@ -68,8 +68,8 @@ page_index:            [2, 3, 5]
 data_offsets:          [1000, 1400, 2000]
 data_lengths:          [200, 100, 300]
 dictionary_ids:        [0, 0, null]
-dictionary_offsets:    [800]
-dictionary_lengths:    [100]
+dictionary_metadata.offsets: [800]
+dictionary_metadata.lengths: [100]
 relative_page_offsets: [0, 100, 0, 0, 200]
 chunk_first_rows:      [0, 100, 0]
 page_first_rows:       [0, 50, 100, 0, 80]
@@ -81,13 +81,13 @@ The equivalent logical page-offset grouping is `[[[0, 100], [0]], [[0, 200]]]`. 
 
 `ColumnChunkMetadata.data_offsets` and `data_lengths` are non-null `list<i64>` streams with `K` values each. Chunk `k` occupies `[data_offsets[k], data_offsets[k] + data_lengths[k])`, containing its contiguous complete data pages, including headers and excluding dictionary bytes. Offsets are absolute and lengths are explicit. No region map, chunk adjacency, fixed row-group layout, or file-order chunk traversal is required.
 
-`DictionaryMetadata.dictionary_offsets` and `dictionary_lengths` form a table with `D` non-null `i64` values in each stream. Entry `d` locates one complete dictionary page, including its header. `ColumnChunkMetadata.dictionary_ids` has `K` nullable `i32` values: null means no dictionary; otherwise the ID is in `[0,D)`. Several chunks of the same physical column may reference one entry, provided their dictionary decoding is compatible. Cross-column dictionary sharing is not permitted. Table entries are stored once and need not follow file order; assigning IDs in first-reference order is a writer choice that encoded well in the prototype. With no dictionaries, both table streams are empty and all chunk IDs are null.
+`DictionaryMetadata.offsets` and `DictionaryMetadata.lengths` form a table with `D` non-null `i64` values in each stream. Entry `d` locates one complete dictionary page, including its header. `ColumnChunkMetadata.dictionary_ids` has `K` nullable `i32` values: null means no dictionary; otherwise the ID is in `[0,D)`. Several chunks of the same physical column may reference one entry, provided their dictionary decoding is compatible. Cross-column dictionary sharing is not permitted. Table entries are stored once and need not follow file order; assigning IDs in first-reference order is a writer choice that encoded well in the prototype. With no dictionaries, both table streams are empty and all chunk IDs are null.
 
 `PageMetadata.relative_page_offsets` contains one non-null `i64` per page, relative to its chunk's `data_offsets[k]`. The first offset of each nonempty chunk is zero. A page ends at the next page offset in that chunk, or at `data_offsets[k] + data_lengths[k]` for the last page.
 
 The page-offset and page-row streams are independently optional. Each present stream has exactly `P` positions; the offset stream includes the zero for a single-page chunk. A reader that knows a chunk has one page can derive its byte extent from the chunk's offset and length without reading that offset. Omitting the first offset from storage would require remapping page positions for the shorter offset array, including handling empty chunks; this draft keeps those positions aligned with other page fields. `page_index` is required whenever `PageMetadata` is present. PAGE statistics require `page_first_rows`; omit `PageMetadata` when both streams are absent.
 
-Optional row-group metadata retains row counts. Its optional `row_group_offsets` stream holds `G + 1` absolute byte boundaries only when complete row groups occupy contiguous intervals in row-group order. Interleaved layouts or dictionaries shared across row groups can omit this byte-range hint; chunk and dictionary locations remain sufficient.
+Optional row-group metadata retains row counts in `RowGroupMetadata.num_rows`. Its optional `RowGroupMetadata.offsets` stream holds `G + 1` absolute byte boundaries only when complete row groups occupy contiguous intervals in row-group order. Interleaved layouts or dictionaries shared across row groups can omit this byte-range hint; chunk and dictionary locations remain sufficient.
 
 ## Statistics reuse the hierarchy
 
@@ -131,7 +131,7 @@ end = data_offsets[k] + relative_page_offsets[p + 1]  if p + 1 < y
       data_offsets[k] + data_lengths[k]              otherwise
 
 d = dictionary_ids[k]
-dictionary = none if d is null else (dictionary_offsets[d], dictionary_lengths[d])
+dictionary = none if d is null else (dictionary_metadata.offsets[d], dictionary_metadata.lengths[d])
 ```
 
 Here `boundary(index, n)` accepts `0 <= n <= length(index)` and never reads `index[-1]` for `n = 0`. For valid column `c`, chunk statistics occupy `[a,b)` and page statistics occupy `[boundary(page_index,a), boundary(page_index,b))`, including empty columns. The same chunk/page positions address codecs, row positions, and tagged statistics. No hierarchy levels need to be scanned or reconstructed.
