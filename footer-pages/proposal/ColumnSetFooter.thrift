@@ -25,8 +25,9 @@ struct FileInfo {
  * C = column_ordinals.size(); K, P and D in reused definitions are local to this set.
  * Local column c maps to source-schema physical ordinal column_ordinals[c].
  * Every StreamLocation has an ABSOLUTE file offset, including statistics streams.
- * Source-data offsets in data_offsets and DictionaryMetadata.offsets are also absolute;
- * relative_page_offsets values remain relative to their data chunk's start.
+ * Source-data offsets in ColumnChunkMetadata.offsets and DictionaryMetadata.offsets
+ * are also absolute. relative_page_offsets values remain relative to their
+ * data chunk's start.
  * Store only dictionaries referenced by this set and rebase IDs to its table.
  * Dictionary reuse is confined to one physical column. Sets contain complete
  * columns, so all references to a dictionary belong to one set: no global

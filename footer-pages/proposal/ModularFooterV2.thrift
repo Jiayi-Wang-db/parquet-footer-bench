@@ -32,8 +32,8 @@
  *
  * Example: C=2, K=3, P=5; columns have 2 and 1 chunks.
  *   column_chunk_index:    [2, 3]
- *   data_offsets:          [1000, 1400, 2000]
- *   data_lengths:          [200, 100, 300]
+ *   offsets:               [1000, 1400, 2000]
+ *   compressed_size:       [200, 100, 300]
  *   dictionary_ids:        [0, 0, null]
  *   dictionary_metadata.offsets: [800]
  *   dictionary_metadata.lengths: [100]
@@ -51,8 +51,8 @@
  * Equivalent per-stream Parquet schemas (illustrative, not serialized):
  *   message column_chunk_index { required int32 value; }
  *   message page_index { required int32 value; }
- *   message data_offsets { required int64 value; }
- *   message data_lengths { required int64 value; }
+ *   message offsets { required int64 value; } // ColumnChunkMetadata.offsets
+ *   message compressed_size { required int64 value; }
  *   message dictionary_ids { optional int32 value; }
  *   message offsets { required int64 value; } // DictionaryMetadata.offsets
  *   message lengths { required int64 value; } // DictionaryMetadata.lengths
@@ -197,14 +197,14 @@ struct ColumnChunkMetadata {
 
   /** list<i64>; number of values = K.
    * Nullability: list and values are non-null. No repetition/definition levels.
-   * Absolute first-row indexes, aligned with flattened data_offsets.
+   * Absolute first-row indexes, aligned with flattened offsets.
    * Required when any COLUMN_CHUNK statistics set is present, including
    * independently encrypted statistics. May be omitted otherwise.
    * Counts include chunks in every column; an empty column adds no position.
    * Starts are independent of row-group ordinal and num_values. If page-row
    * metadata is present for a nonempty chunk, its first row must agree.
    */
-  6: optional StreamLocation chunk_first_rows;
+  6: optional StreamLocation first_row_index;
 
   /** list<i64>; number of values = K.
    * Nullability: list and values are non-null.
@@ -212,17 +212,17 @@ struct ColumnChunkMetadata {
    * Dictionary bytes are excluded. Ordered by column then chunk, with no
    * requirement that byte offsets increase or that chunks be adjacent.
    */
-  7: required StreamLocation data_offsets;
+  7: required StreamLocation offsets;
 
   /** list<i64>; number of values = K.
    * Nullability: list and values are non-null; lengths are non-negative.
    * Complete stored data-page bytes, excluding the referenced dictionary.
-   * Chunk k occupies [data_offsets[k], data_offsets[k] + data_lengths[k]).
+   * Chunk k occupies [offsets[k], offsets[k] + compressed_size[k]).
    * Zero exactly when the chunk has no data pages; nonempty extents are disjoint.
    * Validate offsets and sums against file bounds without integer overflow.
    * Length is explicit; never infer it from another chunk or a dictionary.
    */
-  8: required StreamLocation data_lengths;
+  8: required StreamLocation compressed_size;
 }
 
 /** Independently optional page fields sharing DataLayout.page_index.
@@ -242,9 +242,9 @@ struct PageMetadata {
   /** list<i64>; number of values = P.
    * Nullability: list and values are non-null. No repetition/definition levels.
    * Requires DataLayout.page_index; page_first_rows is independently optional.
-   * Offsets are RELATIVE to ColumnChunkMetadata.data_offsets[k]. Each nonempty
-   * chunk starts at 0 and strictly increases below data_lengths[k]; the last
-   * page ends at data_offsets[k] + data_lengths[k]. Retain the first zero even
+   * Offsets are RELATIVE to ColumnChunkMetadata.offsets[k]. Each nonempty
+   * chunk starts at 0 and strictly increases below compressed_size[k]; the last
+   * page ends at offsets[k] + compressed_size[k]. Retain the first zero even
    * for a single-page chunk, so positions align with other page fields.
    * If absent, locating interior pages requires scanning source-data page headers.
    */
@@ -324,7 +324,7 @@ struct RangeStatistics {
    * interpreted as another kind. Only ARBITRARY stores range_start_rows.
    *
    * COLUMN_CHUNK: one range per chunk of each participating column, in chunk
-   * order. Starts come from ColumnChunkMetadata.chunk_first_rows, which must
+   * order. Starts come from ColumnChunkMetadata.first_row_index, which must
    * be present. No page-row or row-group metadata is needed, and K_c can vary
    * independently per column. Never derive row counts from num_values.
    *
@@ -397,7 +397,7 @@ struct ColumnRangeStatistics {
  * Only the column's physical-type bound stream may be present, with 2S entries.
  * All StreamLocation offsets here are relative to page_streams, which contains
  * every explicitly located stream. Positional tags additionally depend on
- * authenticated shared metadata, including chunk_first_rows for COLUMN_CHUNK.
+ * authenticated shared metadata, including first_row_index for COLUMN_CHUNK.
  */
 struct ColumnRowRangeStatistics {
   /** Independent granularities; nonempty, with the same semantics as the root list.
@@ -487,7 +487,8 @@ struct FileInfo {
  *           + LE32(each path component) + LE64(offset) + LE64(length) + LE32(codec).
  *   column stats: file AAD + NEW_ROW_RANGE_STATISTICS_TYPE + LE32(version) + LE32(column ordinal).
  * Stream paths contain Thrift field IDs and zero-based list positions from the
- * root: [6,7] identifies data_offsets; [4,1] identifies DictionaryMetadata.offsets;
+ * root: [6,7] identifies ColumnChunkMetadata.offsets;
+ * [4,1] identifies DictionaryMetadata.offsets;
  * [7,2] identifies relative_page_offsets; [8,g,2,7] identifies granularity g's
  * min_max_int32. The schema distinguishes field IDs from list positions.
  * Numeric module-type allocations are pending; do not reuse existing PME IDs.
