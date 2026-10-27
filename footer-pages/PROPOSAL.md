@@ -105,7 +105,7 @@ enum RowRangeKind {
 |---|---|---|---|
 | `COLUMN_CHUNK` | `K` | `column_chunk_index` | Shared `ColumnChunkMetadata.first_row_indexes` |
 | `PAGE` | `P` | `column_chunk_index` and `page_index` | Shared `PageMetadata.first_row_indexes` |
-| `ARBITRARY` | `S` | Separate `column_range_starts` | Set-specific `range_start_rows` |
+| `ARBITRARY` | `S` | Separate `column_range_starts` | Set-specific `first_row_indexes` |
 
 Only `ARBITRARY` stores the additional index and row starts. `column_range_starts` has `C + 1` non-null `INT64` entries; equal adjacent entries mean a column has no ranges in that set. Chunk statistics require `ColumnChunkMetadata.first_row_indexes`, so reading them does not require page metadata. Page statistics require page-row metadata but do not require page offsets.
 

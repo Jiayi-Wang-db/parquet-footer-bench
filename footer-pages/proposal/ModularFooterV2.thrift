@@ -181,7 +181,7 @@ struct RangeStatistics {
    * start at 0 and strictly increase below FileInfo.num_rows. End at the next
    * start or FileInfo.num_rows; alignment with chunks/pages/row groups is optional.
    */
-  1: optional StreamLocation range_start_rows;
+  1: optional StreamLocation first_row_indexes;
 
   /** BOOLEAN; number of values = S; nullability: nullable.
    * True: at least one null; false: no nulls.
@@ -222,7 +222,7 @@ struct RangeStatistics {
    * COLUMN_CHUNK: one range per chunk; requires ColumnChunkMetadata.first_row_indexes.
    * PAGE: one range per page; requires PageMetadata.first_row_indexes and both
    * DataLayout indexes. Each participating chunk must have at least one page.
-   * ARBITRARY: explicit range_start_rows; used when positional coverage is unsuitable.
+   * ARBITRARY: explicit first_row_indexes; used when positional coverage is unsuitable.
    *
    * For each participating column, ranges must be nonempty, row-aligned and
    * partition [0, FileInfo.num_rows). Starts begin at 0 and strictly increase;
