@@ -1,19 +1,16 @@
-/** Optional extension for very wide files, such as 30,000 physical columns.
- * Each set lists its physical-column ordinals, allowing noncontiguous groups.
- * Every set's stream descriptors are inline in the common footer directory.
- * Each stream is independently located; sets impose no byte-contiguity rule.
- * Reuses the current ModularFooterV2 types and cumulative-end indexes with an
- * implicit initial zero. Row-group descriptors and encryption are outside this
- * plaintext draft. Wire version and magic allocation are pending.
+/** Optional extension for very wide files, e.g. 30,000 columns.
+ * Sets group complete columns by explicit ordinal, including noncontiguous groups.
+ * Descriptors are inline; streams are independently located, with no set-level
+ * contiguity requirement. Reuses ModularFooterV2 cumulative-end indexes.
+ * Row-group descriptors and encryption are outside this plaintext draft.
+ * Wire version and magic allocation are pending.
  */
 include "ModularFooterV2.thrift"
 include "../../modular-footer/parquet.thrift"
 namespace cpp parquet.columnsets
 
-/** File metadata stored once. N is the number of physical leaves in schema,
- * equal to the sum of column_ordinals.size() across all sets. No separate
- * column count is stored. Field 1 is reserved for the former num_columns.
- * References to FileInfo.num_rows in reused types mean this file's num_rows.
+/** Stored once. N = physical leaves in schema = total column_ordinals entries.
+ * Field 1 (former num_columns) is reserved. Reused types refer to this num_rows.
  */
 struct FileInfo {
   2: required i64 num_rows;
@@ -21,29 +18,18 @@ struct FileInfo {
   4: optional string created_by;
 }
 
-/** One logical group of complete physical columns, in any source-ordinal order.
- * C = column_ordinals.size(); K, P and D in reused definitions are local to this set.
- * Local column c maps to source-schema physical ordinal column_ordinals[c].
- * Every StreamLocation has an ABSOLUTE file offset, including statistics streams.
- * Source-data offsets in ColumnChunkMetadata.offsets and DictionaryMetadata.offsets
- * are also absolute. relative_offset values remain relative to their
- * data chunk's start.
- * Store only dictionaries referenced by this set and rebase IDs to its table.
- * Dictionary reuse is confined to one physical column. Sets contain complete
- * columns, so all references to a dictionary belong to one set: no global
- * lookup, cross-set references, or duplicated dictionary entries are needed.
- * Null slots and empty columns/chunks keep the existing explicit-index rules.
+/** C = column_ordinals.size(); K, P and D are local to this set.
+ * Local C replaces FileInfo.num_columns in reused types.
+ * Stream and source-data offsets are absolute; page offsets remain chunk-relative.
+ * Store only referenced dictionaries and rebase IDs to this set's table.
+ * Dictionaries belong to one physical column, hence one set; no cross-set lookup.
+ * Null slots and empty columns/chunks follow ModularFooterV2 rules.
  */
 struct ColumnSetMetadata {
-  /** Inline list<i32>; one source-schema physical ordinal per local column.
-   * Nullability: list and values are non-null; list must be nonempty.
-   * Ordinals are in [0,N), distinct within and across sets, and need not be
-   * consecutive or sorted. List order defines local column order in all streams.
-   * Ordinal 0 is real membership and must be stored when included.
-   * List length gives C; no first_column or num_columns field is needed.
-   * column_chunk_index has C cumulative ends; page_index, when present, has K.
-   * Both indexes omit only their fixed leading zero; genuine zero ends remain.
-   * Field 2 is reserved for the former num_columns.
+  /** Inline list<i32>; number of values = C > 0; list and values non-null.
+   * Source ordinals in [0,N), distinct across all sets; any order is allowed.
+   * List order defines local column order. Retain ordinal 0 when included.
+   * Field 2 (former num_columns) is reserved.
    */
   1: required list<i32> column_ordinals;
   3: required ModularFooterV2.DataLayout data_layout;
@@ -51,33 +37,21 @@ struct ColumnSetMetadata {
   6: required ModularFooterV2.ColumnChunkMetadata column_chunk_metadata;
   7: optional ModularFooterV2.PageMetadata page_metadata;
 
-  /** Statistics descriptors for these same local columns, inline in the directory.
-   * Each leaf is an independently fetchable stream. COLUMN_CHUNK/PAGE keep
-   * unknown slots and reuse this set's indexes and chunk/page row starts;
-   * only ARBITRARY stores its own column index and row starts.
-   * Any number of granularities is allowed; align them by row interval.
-   * Omission means unknown statistics. Reading location streams does not
-   * require fetching statistics payloads. Decoding one leaf's values does
-   * not require sibling leaves; interpreting ranges requires shared metadata.
+  /** Independent granularities over local columns, using SharedRangeStatistics rules.
+   * Leaves can be fetched/decoded separately; interpreting ranges requires the
+   * shared hierarchy/row metadata. Omission means unknown statistics.
+   * Location reads do not require statistics.
    */
   8: optional list<ModularFooterV2.SharedRangeStatistics> row_range_statistics;
 }
 
 /** Tail: [independently located streams][Compact-Thrift root]
  * [u64 LE absolute root offset][column-set magic; allocation pending].
- * Stream extents must lie before the root, within the file and not overlap.
- * Streams from different sets or fields may be interleaved or separated by gaps.
- * No set-level offset/length, embedded payload, or ordering by set is required.
- * Readers fetch the directory, then location streams for the selected sets.
- * Statistics leaves can be fetched later using the same local hierarchy.
- * Validate stream extents and column membership before dependent reads.
- * FileInfo/schema is stored once; set size is a writer choice. Column chunk
- * counts may differ, including zero. Every physical column occurs in exactly
- * one set, including columns with no chunks. A zero-column file has no sets.
- * Set order is unrestricted; the union of column_ordinals must equal [0,N).
- * Validate against the schema; reject duplicate, missing or out-of-range ordinals.
- * This directory layout requires a new version; it does not read historical
- * column-set artifacts that used contiguous column ranges or leading-zero indexes.
+ * Validate extents: within file, before root, nonoverlapping; interleaving/gaps allowed.
+ * Set size/order is unrestricted. Every physical column belongs to exactly one
+ * set, including empty columns; a zero-column file has no sets. Validate membership
+ * against schema: union is [0,N), with no duplicate or out-of-range ordinals.
+ * New layout/version; incompatible with historical contiguous-range/leading-zero drafts.
  */
 struct ColumnSetFooter {
   1: required i32 version; // Allocation pending.
