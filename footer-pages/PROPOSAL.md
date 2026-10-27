@@ -160,6 +160,44 @@ A column set is a logical grouping. Every stream would retain its own offset, le
 
 Smaller sets reduce metadata fetched for narrow projections but add descriptors and may weaken encoding. Membership encoding (contiguous ranges versus explicit column ordinals), group size, and the extension's directory and protection rules remain open. The [column-set prototype](ColumnSetFooter.thrift) explores contiguous ranges with independently located streams; it is supporting work, not part of the base format or a commitment to that membership representation.
 
+## Size and decoding comparison
+
+“Current” below means the existing Parquet Compact-Thrift footer; “modular” means the baseline proposal linked above. All results use encoded metadata without Zstd. The latest measured direct-offset size results are V35. Decoding results are from the earlier V31 region-map implementation. **V38, including the implicit initial zero, has not been benchmarked; V31 timings do not measure the direct-offset design.**
+
+### Size
+
+ClickBench, bytes of complete metadata at each cumulative scope, including schema, directories, page headers, and required external indexes:
+
+| Metadata retained | Current Parquet Thrift | Modular footer | Direct offsets + dictionary table (V35) |
+|---|---:|---:|---:|
+| Core | 510,422 | 151,028 | 119,000 |
+| Core + chunk statistics | 734,357 | 262,202 | 192,475 |
+| Core + chunk statistics + page locations | 8,497,329 | 4,898,177 | 2,196,129 |
+| Core + chunk statistics + page locations + page statistics | 21,868,253 | 16,887,807 | 9,794,397 |
+
+Across all eight datasets, core metadata totals **1,831,915 bytes** for current Thrift, **582,762** for modular, and **461,814** for V35: reductions of 74.8% and 20.8%, respectively. Small core footers can still be larger than modular; see the [per-dataset size results](DIRECT-OFFSETS.md#core-size-without-zstd). These comparisons cover placement and supported pruning information; current/modular retain exact null counts, while the proposed statistics retain presence flags.
+
+### Decoding time
+
+ClickBench, microseconds per query; lower is better. These are matched historical runs of current Thrift, modular, and V31:
+
+| Query | Columns | Current Parquet Thrift | Modular footer | Earlier explicit indexes (V31, region map) |
+|---|---|---:|---:|---:|
+| Chunk metadata | one | 3,942.88 | 71.42 | 62.27 |
+| Chunk metadata | all | 5,945.00 | 785.95 | 1,161.57 |
+| Chunk statistics | one | 4,764.01 | 80.38 | 41.58 |
+| Chunk statistics | all | 9,667.86 | 1,471.07 | 826.82 |
+| Chunk metadata + page locations | one | 5,267.27 | 315.08 | 253.67 |
+| Chunk metadata + page locations | all | 46,004.50 | 26,803.30 | 17,521.10 |
+| Chunk + page statistics | one | 6,209.03 | 979.58 | 559.10 |
+| Chunk + page statistics | all | 136,643.00 | 109,513.00 | 127,127.00 |
+
+Queries use fresh prototype readers over memory-resident bytes, including parsing, decoding, allocation, output materialization, and checksums; file I/O is excluded. One-column results are medians across nine column positions and read every chunk/page needed for that column. All formats ran interleaved with seven trials in each of three processes, pinned to CPU 16 on an Intel Xeon Platinum 8375C. The queried fields can be a subset of the metadata retained in the size table.
+
+V31 is faster than modular for these one-column queries, while modular is faster for all-column chunk metadata and combined statistics. This does not establish a universal decoding advantage or predict V35/V38 performance.
+
+The [comparison data](proposal-comparison.csv) contains the table values and all eight datasets’ core results. CSV scopes 0–3 correspond to the four size rows above; blank timings mean unmeasured. Values are extracted from the saved `refined-hierarchy-results.json.gz` and V35 `work/direct-explicit-20261026/results.json` records, with no new benchmark run.
+
 ## Supporting material
 
 The [full IDL](ExplicitIndexFooter.thrift) defines every field's type, value count, nullability, and dependencies. Local historical measurements compare [V31 explicit indexes](legacy/ExplicitIndexFooterV31.thrift) and [V32 nested layouts](ImplicitLevelsFooter.thrift), both using region maps, alongside the [current modular footer baseline](../modular-footer/ModularFooter.thrift). They support the selective-read recommendation for explicit indexes over nested levels; their timings do not measure this direct-offset revision. The [direct-offset size results](DIRECT-OFFSETS.md) use [V35](legacy/ExplicitIndexFooterV35.thrift), which stored the leading zero in both hierarchy indexes; they have not been rerun for this cumulative-end revision. Production encryption, direct-offset decoding-speed measurements, and a public interoperability test suite remain outside the validated scope.
