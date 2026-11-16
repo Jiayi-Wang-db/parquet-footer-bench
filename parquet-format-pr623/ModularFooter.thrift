@@ -111,23 +111,17 @@ struct StreamLocation {
  * chunks [2, 5).
  *
  * Every column has an entry, even a column with no chunks, like column 1
- * above. Readers must not treat a missing or unreadable index as meaning
- * there are no chunks or pages.
+ * above. column_chunk_index must have exactly num_columns values, and
+ * page_index, when present, must have exactly num_chunks values.
  */
 struct DataLayout {
-  /** INT32, one value per column: the number of chunks in this column and all
-   * columns before it.
-   * Column c owns chunks [start(column_chunk_index, c), column_chunk_index[c]).
-   * Values never decrease, and the last one equals num_chunks. The stream is
-   * empty if the file has no columns.
+  /** INT32, one value per column: the inclusive prefix sum of
+   * chunks_in_column(c).
    */
   1: required StreamLocation column_chunk_index;
 
-  /** INT32, one value per chunk: the number of pages in this chunk and all
-   * chunks before it.
-   * Chunk k owns pages [start(page_index, k), page_index[k]). Values never
-   * decrease, and the last one equals num_pages. The stream is empty if the
-   * file has no chunks.
+  /** INT32, one value per chunk: the inclusive prefix sum of
+   * pages_in_chunk(k).
    *
    * Required when page_metadata is present. Without it, readers find pages by
    * reading the page headers in the column data; a missing page_index does not
@@ -136,25 +130,22 @@ struct DataLayout {
   2: optional StreamLocation page_index;
 }
 
-/** Locations of the file's dictionary pages. A dictionary ID (see
- * ColumnChunkMetadata.dictionary_ids) is a position in these streams.
+/**
+ * Locations of the file's dictionary pages. A dictionary ID
+ * (ColumnChunkMetadata.dictionary_ids) is a position in these streams. Each
+ * dictionary is stored once, even when chunks share it. Dictionary pages can
+ * be stored anywhere in the file, not necessarily next to the chunks that use
+ * them.
  */
 struct DictionaryMetadata {
   /** INT64, one value per dictionary: the byte offset of the dictionary page
-   * header from the start of the file. The number of dictionaries must fit in
-   * a signed i32, because dictionary IDs are INT32.
-   *
-   * Each dictionary is stored once, even if several chunks use it.
-   * Dictionaries can be stored anywhere in the file and in any order; writers
-   * should store them in the order chunks first use them. If the file has no
-   * dictionaries, both streams are empty.
+   * header from the start of the file.
    */
   1: required StreamLocation offsets;
 
-  /** INT64, one value per dictionary: the size in bytes of the dictionary page
-   * as stored, including its header. Always greater than zero. Dictionary d
-   * occupies bytes [offsets[d], offsets[d] + lengths[d]), which must not
-   * overlap any data pages or other dictionaries.
+  /** INT64, one value per dictionary: the size in bytes of the dictionary
+   * page, including its header. Dictionary pages must not overlap each other
+   * or any data pages.
    */
   2: required StreamLocation lengths;
 }
