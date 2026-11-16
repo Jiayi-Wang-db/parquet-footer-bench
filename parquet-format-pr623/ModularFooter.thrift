@@ -58,13 +58,9 @@ namespace java org.apache.parquet.format.modular
  * DATA_PAGE_V2; DATA_PAGE (V1) and other page types are not allowed.
  * Allowing more page types requires a new ModularFooter.version.
  *
- * The stream schema is not serialized. The doc of the field that holds a
- * StreamLocation gives the stream's physical type, how many values it has,
- * and whether values can be null. Repetition levels are always 0. Non-nullable
- * streams have no definition levels (max level 0); nullable streams use
- * definition level 0 for null and 1 for a present value. A null value still
- * takes up its position in the stream. Thrift `optional` on a field controls
- * whether the stream exists, not whether its values can be null.
+ * The stream's schema is not written to the file. Instead, the doc of the
+ * field that holds the StreamLocation says the stream's type, how many values
+ * it has, and whether values can be null.
  *
  * Streams are independent of each other: they need not have the same number
  * of values, their page boundaries need not line up, and together they do not
@@ -77,8 +73,10 @@ namespace java org.apache.parquet.format.modular
  */
 struct StreamLocation {
   /** Byte offset of the stream's first page header, from the start of the
-   * file. Inside ColumnRowRangeStatistics, the offset is relative to the start
-   * of page_streams instead.
+   * file. Streams in a column's encrypted statistics module are the
+   * exception: they are stored inside the module, so their offset is counted
+   * from the start of the module's decrypted stream bytes
+   * (ColumnRowRangeStatistics.page_streams).
    */
   1: required i64 offset;
 
@@ -87,11 +85,9 @@ struct StreamLocation {
    */
   2: required i64 length;
 
-  /** Compression codec of the stream's pages. It applies to dictionary page
-   * bodies, and to data page values when DataPageHeaderV2.is_compressed is
-   * true; levels are never compressed. Pages are compressed before they are
-   * signed or encrypted. This codec does not have to match the codecs used for
-   * the file's column data.
+  /** Compression codec of the stream's pages, used as in any Parquet column
+   * chunk. Metadata stream compression is independent of column data
+   * compression. Pages are compressed before they are signed or encrypted.
    */
   3: required parquet.CompressionCodec codec;
 }
@@ -99,13 +95,15 @@ struct StreamLocation {
 /**
  * Maps columns to their chunks, and chunks to their pages.
  *
- * Both fields are INT32 streams of range ends. Entry i is the exclusive end of
- * item i's range. The range starts at start(index, i), which is 0 for i = 0
- * and index[i-1] otherwise. With n entries, start(index, n) is the last
- * entry: the total number of chunks or pages. Entries count chunks or pages;
- * they are not byte offsets. Because the first range always starts at 0, that
- * 0 is not stored. Entries equal to 0 or to the previous entry are stored, and
- * mean an empty range.
+ * Chunks are numbered in column order: column 0's chunks first, then column
+ * 1's, and so on. Pages are numbered the same way, in chunk order.
+ *
+ * Both fields store running totals. column_chunk_index[c] is the number of
+ * chunks in columns 0 through c, and page_index[k] is the number of pages in
+ * chunks 0 through k. So item i owns the range [start(index, i), index[i]),
+ * where start(index, i) is 0 for i = 0 and index[i-1] otherwise. With n
+ * entries, start(index, n) is the last entry: the total number of chunks or
+ * pages. An item with no chunks or pages repeats the previous total.
  *
  * Example: three columns with 2, 0 and 3 chunks give
  *   column_chunk_index = [2, 2, 5]
@@ -117,14 +115,16 @@ struct StreamLocation {
  * there are no chunks or pages.
  */
 struct DataLayout {
-  /** INT32, one value per column: the end of the column's range of chunks.
+  /** INT32, one value per column: the number of chunks in this column and all
+   * columns before it.
    * Column c owns chunks [start(column_chunk_index, c), column_chunk_index[c]).
    * Values never decrease, and the last one equals num_chunks. The stream is
    * empty if the file has no columns.
    */
   1: required StreamLocation column_chunk_index;
 
-  /** INT32, one value per chunk: the end of the chunk's range of pages.
+  /** INT32, one value per chunk: the number of pages in this chunk and all
+   * chunks before it.
    * Chunk k owns pages [start(page_index, k), page_index[k]). Values never
    * decrease, and the last one equals num_pages. The stream is empty if the
    * file has no chunks.
