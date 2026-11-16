@@ -77,7 +77,7 @@ struct StreamLocation {
    * file. Streams in a column's encrypted statistics are the exception: they
    * are stored inside the encrypted statistics, so their offset is counted
    * from the start of the decrypted stream bytes
-   * (ColumnRowRangeStatistics.page_streams).
+   * (ColumnRowRangeStatistics.stream_data).
    */
   1: required i64 offset;
 
@@ -476,7 +476,7 @@ struct ColumnRowRangeStatistics {
    *   [null_count pages][min_int64 pages]
    * with null_count.offset = 0 and min_int64.offset = null_count.length.
    */
-  2: required binary page_streams;
+  2: required binary stream_data;
 
   /** One BoundaryOrder per entry in statistics. If the list is absent or
    * shorter than statistics, the missing entries are UNORDERED.
