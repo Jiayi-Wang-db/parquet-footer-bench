@@ -22,16 +22,11 @@
  * metadata streams. A small root struct, ModularFooter (defined at the end of
  * this file), sits at the end of the file and records where each stream is.
  *
- * A column chunk is one contiguous run of data pages for a single physical
- * column. Chunk boundaries are not tied to row groups: each column can have
- * its own number of chunks, including zero, regardless of the number of row
- * groups. Which chunk a page belongs to does not by itself tell a reader which
- * rows the page covers; row positions come from the first_row_indexes streams.
- *
  * The modular footer uses these counts. Field docs refer to them by name,
  * e.g. "INT64, num_chunks values" means one value per chunk.
  *   num_columns         = |physical (leaf) columns| = FileInfo.num_columns
- *   chunks_in_column(c) = |chunks of column c|; may be zero
+ *   chunks_in_column(c) = |chunks of column c|, where a chunk is one
+ *                         contiguous run of data pages; may be zero
  *   num_chunks          = |chunks| = sum of chunks_in_column(c)
  *   pages_in_chunk(k)   = |data pages of chunk k|
  *   num_pages           = |data pages| = sum of pages_in_chunk(k)
@@ -170,9 +165,13 @@ struct RowGroupMetadata {
 }
 
 /**
- * Per-chunk metadata. Every stream has num_chunks values, one per chunk,
- * ordered by column and then by chunk within the column;
- * DataLayout.column_chunk_index says which positions belong to which column.
+ * Per-chunk metadata. A column chunk is one contiguous run of data pages for
+ * a single column. Chunks are not tied to row groups: each column can have its
+ * own number of chunks, including zero.
+ *
+ * Every stream has num_chunks values, one per chunk, ordered by column and
+ * then by chunk within the column; DataLayout.column_chunk_index says which
+ * positions belong to which column.
  */
 struct ColumnChunkMetadata {
   /** INT32, num_chunks non-null values. The parquet.CompressionCodec of
@@ -211,10 +210,11 @@ struct ColumnChunkMetadata {
   5: required StreamLocation num_values;
 
   /** INT64, num_chunks non-null values. Index of each chunk's first row within
-   * the file. Required if any statistics use COLUMN_CHUNK ranges, including
-   * encrypted statistics. Independent of row groups and of num_values. When
-   * PageMetadata.first_row_indexes is present, the value must equal the first
-   * row of the chunk's first page.
+   * the file. A chunk's position in its column does not say which rows it
+   * covers; this stream does. Required if any statistics use COLUMN_CHUNK
+   * ranges, including encrypted statistics. Independent of row groups and of
+   * num_values. When PageMetadata.first_row_indexes is present, the value
+   * must equal the first row of the chunk's first page.
    */
   6: optional StreamLocation first_row_indexes;
 
