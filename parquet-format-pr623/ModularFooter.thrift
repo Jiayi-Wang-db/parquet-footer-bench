@@ -291,91 +291,81 @@ struct RangeStatistics {
    *   first_row_indexes, for example every 100,000 rows. The ranges need not
    *   line up with chunks, pages or row groups.
    *
-   * Writers always set this field; if it is absent, readers treat it as
-   * ARBITRARY. Readers cannot use statistics whose range_kind they do not
+   * For each column, the ranges cover every row from 0 to FileInfo.num_rows
+   * exactly once, with no empty ranges. This also applies to encrypted
+   * statistics. Readers cannot use statistics whose range_kind they do not
    * recognize.
-   *
-   * For each column covered by these statistics, the ranges must cover every
-   * row from 0 to FileInfo.num_rows exactly once, with no empty ranges. Ranges
-   * start and end on row boundaries, which matters for nested columns. In other
-   * words, the first range starts at row 0, starts strictly increase, and each
-   * range ends where the next one starts (the last at num_rows). Readers must
-   * check these rules; increasing starts alone are not enough to prove there
-   * are no gaps.
-   *
-   * The same rules apply to encrypted statistics. Before using the DataLayout
-   * and first_row_indexes streams that these statistics depend on, readers
-   * must authenticate or decrypt those streams under their own protection.
    */
-  13: optional RowRangeKind range_kind = RowRangeKind.ARBITRARY;
+  1: required RowRangeKind range_kind;
 
-  /** INT64, one value per range: the row number, within the file, of the
-   * range's first row. Present if and only if range_kind is ARBITRARY.
-   *
-   * For each column, the first range starts at row 0, and starts strictly
-   * increase and stay below FileInfo.num_rows. Each range ends where the next
-   * one starts; the last one ends at FileInfo.num_rows. Ranges do not have to
-   * line up with chunks, pages or row groups.
+  /** INT64, one value per range: the row number of the range's first row.
+   * Present if and only if range_kind is ARBITRARY.
    */
-  1: optional StreamLocation first_row_indexes;
+  2: optional StreamLocation first_row_indexes;
 
   /** INT64, one nullable value per range: the number of null values in the
    * range.
    */
-  2: optional StreamLocation null_count;
+  3: optional StreamLocation null_count;
 
   /** INT64, one nullable value per range: the number of NaN values in the
-   * range. NaNs are non-null values, so they are not part of null_count.
+   * range. NaNs are not counted in null_count.
    */
-  3: optional StreamLocation nan_count;
+  4: optional StreamLocation nan_count;
 
   /** INT64, one nullable value per range: the number of values in the range,
-   * including nulls and NaNs. For a nested column this can be more than the
-   * number of rows.
+   * including nulls and NaNs. Must not be written for COLUMN_CHUNK ranges,
+   * which use ColumnChunkMetadata.num_values instead.
    */
-  4: optional StreamLocation num_values;
+  5: optional StreamLocation num_values;
 
   /** INT64, one nullable value per range: the number of distinct values in the
    * range.
    */
-  5: optional StreamLocation distinct_counts;
+  6: optional StreamLocation distinct_counts;
 
-  /** Minimum and maximum values, in one stream per physical type. A column's
-   * bounds are stored in the stream for its physical type. Each stream has two
-   * nullable values per range, min then max: [min_0, max_0, min_1, max_1, ...].
-   * A value is null when that bound is unavailable, or when the column has a
-   * different physical type. A min/max pair may be split across two pages of
-   * the stream.
+  /** Minimum values, one stream per physical type; each column uses the
+   * stream for its type. One nullable value per range. A value is null when
+   * the minimum is unavailable or the column has a different type.
    */
-  6: optional StreamLocation min_max_boolean; // BOOLEAN
-  7: optional StreamLocation min_max_int32; // INT32
-  8: optional StreamLocation min_max_int64; // INT64
-  9: optional StreamLocation min_max_float; // FLOAT
-  10: optional StreamLocation min_max_double; // DOUBLE
-  11: optional StreamLocation min_max_byte_array; // BYTE_ARRAY
+  7: optional StreamLocation min_boolean; // BOOLEAN
+  8: optional StreamLocation min_int32; // INT32
+  9: optional StreamLocation min_int64; // INT64
+  10: optional StreamLocation min_float; // FLOAT
+  11: optional StreamLocation min_double; // DOUBLE
+  12: optional StreamLocation min_byte_array; // BYTE_ARRAY
 
-  /** BOOLEAN, two nullable values per range, matching the min/max values
-   * above. True means the bound is exact (it is the actual minimum or maximum
-   * of the range), false means it is not, and null means unknown. The value
-   * must be null wherever the bound itself is unavailable.
+  /** Maximum values, stored the same way as the minimum values. */
+  13: optional StreamLocation max_boolean; // BOOLEAN
+  14: optional StreamLocation max_int32; // INT32
+  15: optional StreamLocation max_int64; // INT64
+  16: optional StreamLocation max_float; // FLOAT
+  17: optional StreamLocation max_double; // DOUBLE
+  18: optional StreamLocation max_byte_array; // BYTE_ARRAY
+
+  /** BOOLEAN, one nullable value per range: whether the minimum is the actual
+   * minimum of the range. Null when unknown or when the minimum is
+   * unavailable.
    */
-  12: optional StreamLocation min_max_is_exact;
+  19: optional StreamLocation min_is_exact;
+
+  /** BOOLEAN, one nullable value per range: whether the maximum is the actual
+   * maximum of the range. Null when unknown or when the maximum is
+   * unavailable.
+   */
+  20: optional StreamLocation max_is_exact;
 }
 
 /**
- * One set of row-range statistics for all columns. Its streams are protected
- * the same way as the rest of the footer.
- *
- * With COLUMN_CHUNK or PAGE ranges, num_ranges equals num_chunks or
- * num_pages. A column whose statistics are stored in its separately encrypted
- * module is treated as lacking statistics here (see RangeStatistics).
+ * One set of row-range statistics for all columns, protected like the rest of
+ * the footer. Columns whose statistics are in their own encrypted module are
+ * treated as lacking statistics here.
  */
 struct SharedRangeStatistics {
-  /** INT64, one value per column plus one: where each column's ranges start.
-   * Present if and only if statistics.range_kind is ARBITRARY. Column c owns
-   * ranges [column_range_starts[c], column_range_starts[c+1]). Values never
-   * decrease; the first is 0 and the last is num_ranges. Two equal consecutive
-   * values mean the column has no ranges.
+  /** INT64, one value per column plus one: the running total of ranges per
+   * column, starting at 0. Column c owns ranges
+   * [column_range_starts[c], column_range_starts[c+1]). Present if and only if
+   * statistics.range_kind is ARBITRARY.
    */
   1: optional StreamLocation column_range_starts;
 
@@ -388,10 +378,9 @@ struct SharedRangeStatistics {
    */
   2: required RangeStatistics statistics;
 
-  /** INT32, one value per column: whether the column's min/max values are
-   * sorted across its ranges, as a parquet.BoundaryOrder. Columns with no
-   * statistics in this set must be UNORDERED. If this stream is absent, every
-   * column is UNORDERED.
+  /** INT32, one value per column: the parquet.BoundaryOrder of the column's
+   * min/max values across its ranges; UNORDERED for columns without
+   * statistics. If this stream is absent, every column is UNORDERED.
    */
   3: optional StreamLocation boundary_orders;
 }
@@ -437,8 +426,8 @@ struct FileInfo {
  *   column statistics: NEW_ROW_RANGE_STATISTICS_TYPE + LE32(version)
  *           + LE32(column ordinal).
  * A stream's path lists the Thrift field IDs and zero-based list positions
- * from the root struct down to the StreamLocation. For example, [8, g, 2, 7]
- * identifies min_max_int32 in statistics set g of row_range_statistics. Path
+ * from the root struct down to the StreamLocation. For example, [8, g, 2, 8]
+ * identifies min_int32 in statistics set g of row_range_statistics. Path
  * components follow the schema. The module type values are not yet allocated;
  * they must not reuse existing PME module type IDs.
  */
@@ -452,8 +441,8 @@ struct FileInfo {
  * (chunks_in_column(c)), and PAGE statistics one range per page of this column.
  * Both reuse the shared, authenticated DataLayout and first_row_indexes
  * streams. ARBITRARY statistics store their own first_row_indexes for this
- * column, and no column_range_starts. Only the min/max stream for the column's
- * physical type may be present.
+ * column, and no column_range_starts. Only the min and max streams for the
+ * column's physical type may be present.
  */
 struct ColumnRowRangeStatistics {
   /** One or more independent statistics sets for this column, with the same
@@ -468,9 +457,9 @@ struct ColumnRowRangeStatistics {
    * this struct are relative to the start of this field. Streams here are not
    * signed or encrypted individually; the whole module is encrypted once.
    *
-   * Example: if statistics[0] has null_count and min_max_int64, this field is
-   *   [null_count pages][min_max_int64 pages]
-   * with null_count.offset = 0 and min_max_int64.offset = null_count.length.
+   * Example: if statistics[0] has null_count and min_int64, this field is
+   *   [null_count pages][min_int64 pages]
+   * with null_count.offset = 0 and min_int64.offset = null_count.length.
    */
   2: required binary page_streams;
 
