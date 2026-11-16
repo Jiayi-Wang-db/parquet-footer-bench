@@ -266,9 +266,13 @@ enum RowRangeKind {
 }
 
 /**
- * Statistics for a list of row ranges: each stream has one value per range
- * (num_ranges in total). The struct that contains a RangeStatistics says which
- * ranges belong to which column.
+ * Statistics for a list of row ranges. Each stream has one value per range
+ * (num_ranges in total). In SharedRangeStatistics the list holds the ranges of
+ * all columns, one column after another; in ColumnRowRangeStatistics it holds
+ * the ranges of a single column.
+ *
+ * A column can lack statistics. With COLUMN_CHUNK or PAGE ranges it keeps its
+ * positions and its values are null; with ARBITRARY ranges it has no ranges.
  *
  * A null value or a missing stream means the statistic is unknown for that
  * range. In particular, null min/max values do not mean that every value in
@@ -362,11 +366,9 @@ struct RangeStatistics {
  * One set of row-range statistics for all columns. Its streams are protected
  * the same way as the rest of the footer.
  *
- * With COLUMN_CHUNK or PAGE ranges there is one range per chunk or per page,
- * so every chunk or page has a slot, and num_ranges equals num_chunks or
- * num_pages. A slot is null (unknown) when the statistic is unavailable or is
- * stored in the column's separately encrypted module. With ARBITRARY ranges,
- * each column has its own ranges, and a column may have none.
+ * With COLUMN_CHUNK or PAGE ranges, num_ranges equals num_chunks or
+ * num_pages. A column whose statistics are stored in its separately encrypted
+ * module is treated as lacking statistics here (see RangeStatistics).
  */
 struct SharedRangeStatistics {
   /** INT64, one value per column plus one: where each column's ranges start.
@@ -569,12 +571,15 @@ struct ModularFooter {
   6: required ColumnChunkMetadata column_chunk_metadata;
   7: optional PageMetadata page_metadata;
 
-  /** Any number of independent statistics sets, for example one with a range
-   * per chunk and one with a range per page. Where possible, list sets with
-   * larger ranges first. Ranges in different sets do not have to nest; readers
-   * match ranges across sets by row interval, not by position in the list, and
-   * must not add up counts from overlapping ranges. Leave out sets that have no
-   * statistics, and leave out the list if no sets remain.
+  /** Statistics sets for the file. Each set divides rows into ranges in its
+   * own way (see RangeStatistics.range_kind). A file can have several, for
+   * example statistics over column chunks, over pages, or over arbitrary row
+   * ranges.
+   *
+   * Sets are independent: a range in one set does not have to fall inside a
+   * range of another. To combine sets, match ranges by the rows they cover, not
+   * by their position, and do not add up counts from ranges that overlap.
+   * Leave out sets without statistics, and leave out the list when none remain.
    */
   8: optional list<SharedRangeStatistics> row_range_statistics;
 
