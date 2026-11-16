@@ -410,126 +410,75 @@ struct FileInfo {
 // Parquet Modular Encryption (PME) structures.
 
 /**
- * Encryption follows Parquet Modular Encryption (Encryption.md). This section
- * only describes how the modular footer differs.
- *
- * Footer modes. In both modes, crypto_metadata holds the encryption algorithm
- * and footer key metadata, and the root struct is signed like a plaintext
- * footer (Encryption.md 5.5): a 28-byte nonce and tag follow it.
- * - Encrypted footer mode: FileInfo is stored in encrypted_file_info, and each
- *   shared stream is encrypted separately with the footer key. The magic
- *   string stays "PAR3"; "PARE" is not used.
+ * Encryption follows Parquet Modular Encryption (Encryption.md), with these
+ * differences:
+ * - The root struct is always signed, like a plaintext footer.
+ * - Encrypted footer mode: FileInfo is in encrypted_file_info, and each shared
+ *   stream is encrypted with the footer key. The magic stays "PAR3".
  * - Plaintext footer mode: FileInfo is plaintext, and each shared stream is
- *   signed with the footer key, the same way as the root struct.
- *
- * Column keys. As with encrypted_column_metadata (Encryption.md 5.3), the
- * statistics of a column with its own key are serialized separately and
- * encrypted with that key; see EncryptedRowRangeStatistics.
- *
- * Encrypted data is serialized as in Encryption.md 5.1 (length, nonce,
- * ciphertext, tag), and those bytes count toward StreamLocation.length.
- * Readers verify the root struct before using it, and each stream before
- * parsing its pages.
- *
- * AAD. The AAD prefix and internal file identifier are as in Encryption.md
- * 4.4. The suffix uses new module types and, instead of row group and page
- * ordinals, these fields:
- *   root struct:       NEW_FOOTER_DIRECTORY_TYPE + LE32(version)
- *   FileInfo:          NEW_FILE_INFO_TYPE + LE32(version)
- *   stream:            NEW_METADATA_STREAM_TYPE + LE32(version)
- *                      + LE32(path length) + LE32(each path component)
- *                      + LE64(offset) + LE64(length) + LE32(codec)
- *   column statistics: NEW_ROW_RANGE_STATISTICS_TYPE + LE32(version)
- *                      + LE32(column ordinal)
- * A stream's path lists the Thrift field IDs and zero-based list positions
- * from the root struct to the StreamLocation; for example, [8, g, 2, 8] is
- * min_int32 in statistics set g of row_range_statistics. The new module type
- * values are not allocated yet.
+ *   signed with the footer key.
+ * - If a column is encrypted with its own key, its statistics are not stored
+ *   in the shared statistics. They are encrypted with that column key and
+ *   stored separately (see EncryptedRowRangeStatistics).
+ * - AAD suffixes use new module types, with these fields in place of row group
+ *   and page ordinals:
+ *     root struct (NEW_FOOTER_DIRECTORY_TYPE): LE32(version)
+ *     FileInfo (NEW_FILE_INFO_TYPE): LE32(version)
+ *     stream (NEW_METADATA_STREAM_TYPE): LE32(version), the stream's path
+ *       (LE32 count, then LE32 per component), LE64(offset), LE64(length) and
+ *       LE32(codec). The path is the Thrift field IDs and list positions from
+ *       the root struct to the StreamLocation, e.g. [8, 0, 2, 8] for min_int32
+ *       in statistics set 0.
+ *     column statistics (NEW_ROW_RANGE_STATISTICS_TYPE): LE32(version) and
+ *       LE32(column ordinal)
+ *   Module type values are not allocated yet.
  */
 
 /**
- * Plaintext of one column's encrypted statistics, serialized with the Thrift
- * compact protocol. All ranges belong to that column
- * (EncryptedColumnRowRangeStatistics.column_ordinal).
- *
- * COLUMN_CHUNK statistics have one range per chunk of this column
- * (chunks_in_column(c)), and PAGE statistics one range per page of this column.
- * Both reuse the shared, authenticated DataLayout and first_row_indexes
- * streams. ARBITRARY statistics store their own first_row_indexes for this
- * column, and no column_range_index. Only the min and max streams for the
- * column's physical type may be present.
+ * One column's statistics, encrypted as a whole with the column's key.
+ * Positions count only this column's chunks, pages or ranges, and only the
+ * min and max streams for the column's type may be present.
  */
 struct ColumnRowRangeStatistics {
-  /** One or more independent statistics sets for this column, with the same
-   * meaning as RangeStatistics elsewhere. Range positions count only this
-   * column's chunks, pages or ranges. All sets are encrypted together.
-   */
+  /** This column's statistics sets, as in SharedRangeStatistics. */
   1: required list<RangeStatistics> statistics;
 
-  /** The pages of every stream referenced by `statistics`, concatenated,
-   * encoded and compressed before encryption. Each stream uses
-   * the page format described on StreamLocation, and StreamLocation offsets in
-   * this struct are relative to the start of this field. Streams here are not
-   * signed or encrypted individually; this whole struct is encrypted once.
-   *
-   * Example: if statistics[0] has null_count and min_int64, this field is
-   *   [null_count pages][min_int64 pages]
-   * with null_count.offset = 0 and min_int64.offset = null_count.length.
+  /** The bytes of the streams in `statistics`. Their StreamLocation offsets
+   * are counted from the start of this field.
    */
   2: required binary stream_data;
 
-  /** One BoundaryOrder per entry in statistics. If the list is absent or
-   * shorter than statistics, the missing entries are UNORDERED.
+  /** BoundaryOrder of each entry in statistics; missing entries are
+   * UNORDERED.
    */
   3: optional list<parquet.BoundaryOrder> boundary_orders;
 }
 
 /** Location and key of one column's encrypted statistics. */
 struct EncryptedColumnRowRangeStatistics {
-  /** Which column the statistics belong to: its position among the physical
-   * (leaf) columns in FileInfo.schema, from 0 to num_columns - 1.
-   */
+  /** The column's position among the leaf columns in FileInfo.schema. */
   1: required i32 column_ordinal;
 
-  /** Which key encrypts the statistics, as in ColumnChunk.crypto_metadata.
-   * ENCRYPTION_WITH_COLUMN_KEY: path_in_schema must match column_ordinal.
-   * ENCRYPTION_WITH_FOOTER_KEY: the footer key is used.
+  /** Key used, as in ColumnChunk.crypto_metadata. path_in_schema must match
+   * column_ordinal.
    */
   2: required parquet.ColumnCryptoMetaData crypto_metadata;
 
-  /** Byte offset of the encrypted statistics (their 4-byte length prefix)
-   * from the start of the file. They are stored before the ModularFooter root
-   * struct.
-   */
+  /** Byte offset from the start of the file. */
   3: required i64 offset;
 
-  /** Size in bytes, serialized as in Encryption.md 5.1. The plaintext is a
-   * ColumnRowRangeStatistics.
-   */
+  /** Size in bytes. The plaintext is a ColumnRowRangeStatistics. */
   4: required i64 length;
 }
 
 /**
- * Statistics encrypted separately for each column. Omit this struct when
- * there are none.
- *
- * Columns listed here keep their positions in the shared statistics: with
- * ARBITRARY ranges they have zero shared ranges, and with COLUMN_CHUNK or PAGE
- * ranges their shared values are null (unknown).
- *
- * Statistics encrypted with the footer key can instead stay in the shared
- * streams, encrypted like the rest of the footer. Statistics that use a column
- * key must be encrypted separately. In files whose streams are signed but not
- * encrypted, statistics that need encryption must also be encrypted
- * separately.
- *
- * A reader without the key treats the column's statistics as unavailable. A
- * failed authentication or malformed plaintext is an error.
+ * Statistics encrypted separately per column: for columns with their own key,
+ * or that need encryption in a plaintext footer mode file. In the shared
+ * statistics these columns have null values, or no ranges with ARBITRARY. A
+ * reader without the key treats their statistics as unavailable.
  */
 struct EncryptedRowRangeStatistics {
-  /** One entry per column with encrypted statistics, sorted by column_ordinal.
-   * Each column appears at most once, and the byte ranges must not overlap.
-   */
+  /** One entry per column, sorted by column_ordinal. */
   1: required list<EncryptedColumnRowRangeStatistics> columns;
 }
 
