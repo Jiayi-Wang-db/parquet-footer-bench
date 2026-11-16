@@ -25,8 +25,7 @@
  * The modular footer uses these counts:
  *   num_columns         = |physical (leaf) columns| = FileInfo.num_columns
  *   chunks_in_column(c) = |chunks of column c|, where a chunk is one
- *                         contiguous run of data pages; may be zero if
- *                         every value in the column is null
+ *                         contiguous run of data pages
  *   num_chunks          = |chunks| = sum of chunks_in_column(c)
  *   pages_in_chunk(k)   = |data pages of chunk k|
  *   num_pages           = |data pages| = sum of pages_in_chunk(k)
@@ -245,8 +244,7 @@ struct ColumnChunkMetadata {
 struct PageMetadata {
   /** INT64, one value per page: the row number, within the file, of the page's
    * first row. Required if any statistics, including encrypted statistics, use
-   * PAGE ranges. If absent, readers get row positions from the data page
-   * headers.
+   * PAGE ranges. If absent, readers get row positions from the data pages.
    */
   1: optional StreamLocation first_row_indexes;
 
@@ -280,6 +278,11 @@ enum RowRangeKind {
  * the range is null; use null_count and num_values for that. Counts are never
  * negative. When null_count, nan_count and num_values are all known,
  * null_count + nan_count <= num_values.
+ *
+ * Min/max values use FileInfo.column_orders and follow the bound semantics of
+ * parquet.Statistics.min_value and max_value, including the NaN and signed-zero
+ * rules in parquet.ColumnOrder. Min/max statistics are not supported for INT96
+ * columns.
  */
 struct RangeStatistics {
   /** How the ranges are defined:
@@ -292,22 +295,25 @@ struct RangeStatistics {
    *   first_row_indexes, for example every 100,000 rows. The ranges need not
    *   line up with chunks, pages or row groups.
    *
-   * For each column, the ranges cover every row from 0 to FileInfo.num_rows
-   * exactly once, with no empty ranges. This also applies to encrypted
-   * statistics. Readers cannot use statistics whose range_kind they do not
-   * recognize.
+   * For each column represented by one or more ranges, those ranges cover
+   * [0, FileInfo.num_rows) exactly once, with no empty ranges. Columns without
+   * ARBITRARY statistics have no ranges. For COLUMN_CHUNK and PAGE, columns
+   * with no chunks or pages, respectively, have no ranges. Empty files have
+   * no ranges. These rules also apply to encrypted statistics. Readers cannot
+   * use statistics whose range_kind they do not recognize.
    */
   1: required RowRangeKind range_kind;
 
-  /** INT64, one value per range: the row number of the range's first row. A
-   * range ends where the next one starts, or at FileInfo.num_rows if the next
-   * value is 0 or there is none. Present if and only if range_kind is
-   * ARBITRARY.
+  /** INT64, one value per range: the row number of the range's first row.
+   * Within each column, a range ends where the next one starts, or at
+   * FileInfo.num_rows for the last range. Present if and only if range_kind
+   * is ARBITRARY.
    *
-   * Example: in a file with 250,000 rows,
+   * Example: in a file with 250,000 rows, two columns have three ranges and
+   * one range, respectively:
    *   first_row_indexes = [0, 100000, 200000, 0]
-   * gives the ranges [0, 100000), [100000, 200000), [200000, 250000) and
-   * [0, 250000).
+   * The first column has ranges [0, 100000), [100000, 200000) and
+   * [200000, 250000). The second column has the range [0, 250000).
    */
   2: optional StreamLocation first_row_indexes;
 
@@ -332,7 +338,7 @@ struct RangeStatistics {
    */
   6: optional StreamLocation distinct_counts;
 
-  /** Minimum values, one stream per physical type; each column uses the
+  /** Minimum values, one stream per supported physical type; each column uses the
    * stream for its type. One nullable value per range. A value is null when
    * the minimum is unavailable or the column has a different type.
    */
@@ -343,6 +349,14 @@ struct RangeStatistics {
   11: optional StreamLocation min_double; // DOUBLE
   12: optional StreamLocation min_byte_array; // BYTE_ARRAY
 
+  /** BYTE_ARRAY, one nullable value per range: the minimum for a
+   * FIXED_LEN_BYTE_ARRAY column. Null when the minimum is unavailable or the
+   * column has a different physical type. Each non-null value must contain
+   * exactly SchemaElement.type_length bytes for its column. The stream uses
+   * BYTE_ARRAY so columns with different fixed lengths can share it.
+   */
+  21: optional StreamLocation min_fixed_len_byte_array;
+
   /** Maximum values, stored the same way as the minimum values. */
   13: optional StreamLocation max_boolean; // BOOLEAN
   14: optional StreamLocation max_int32; // INT32
@@ -350,6 +364,11 @@ struct RangeStatistics {
   16: optional StreamLocation max_float; // FLOAT
   17: optional StreamLocation max_double; // DOUBLE
   18: optional StreamLocation max_byte_array; // BYTE_ARRAY
+
+  /** BYTE_ARRAY, one nullable value per range: the maximum for a
+   * FIXED_LEN_BYTE_ARRAY column, stored as in min_fixed_len_byte_array.
+   */
+  22: optional StreamLocation max_fixed_len_byte_array;
 
   /** BOOLEAN, one nullable value per range: whether the minimum is the actual
    * minimum of the range. Null when unknown or when the minimum is
@@ -372,7 +391,8 @@ struct RangeStatistics {
 struct SharedRangeStatistics {
   /** INT64, one value per column: the inclusive prefix sum of each column's
    * number of ranges, like DataLayout.column_chunk_index. Column c owns ranges
-   * [start(column_range_index, c), column_range_index[c]). Only for ARBITRARY.
+   * [start(column_range_index, c), column_range_index[c]). Present if and only
+   * if statistics.range_kind is ARBITRARY.
    *
    * Example: columns a, b and c with 3, 0 and 1 ranges give
    *   column_range_index = [3, 3, 4]
@@ -389,13 +409,14 @@ struct SharedRangeStatistics {
   2: required RangeStatistics statistics;
 
   /** INT32, one value per column: the parquet.BoundaryOrder of the column's
-   * min/max values across its ranges; UNORDERED for columns without
-   * statistics. If this stream is absent, every column is UNORDERED.
+   * min/max values across its ranges, compared using FileInfo.column_orders.
+   * UNORDERED for columns without statistics. If this stream is absent, every
+   * column is UNORDERED.
    */
   3: optional StreamLocation boundary_orders;
 }
 
-/** Basic file metadata: column count, row count and schema. */
+/** File schema, row and column counts, writer information and column orders. */
 struct FileInfo {
   /** Number of physical (leaf) columns. */
   1: required i32 num_columns;
@@ -405,6 +426,17 @@ struct FileInfo {
   3: required list<parquet.SchemaElement> schema;
   /** Application that wrote the file, as in FileMetaData.created_by. */
   4: optional string created_by;
+
+  /** Comparison orders for min/max statistics, as in FileMetaData.column_orders.
+   * When present, contains exactly num_columns entries in schema leaf-column
+   * order. Each entry applies to all statistics sets for that column, including
+   * encrypted statistics.
+   *
+   * Required when any statistics set contains a non-null min/max value. If the
+   * list is absent or a column's order is unsupported or undefined, readers
+   * must ignore that column's min/max statistics and boundary orders.
+   */
+  5: optional list<parquet.ColumnOrder> column_orders;
 }
 
 // Parquet Modular Encryption (PME) structures.
@@ -448,7 +480,8 @@ struct ColumnRowRangeStatistics {
    */
   2: required binary stream_data;
 
-  /** BoundaryOrder of each entry in statistics; missing entries are
+  /** BoundaryOrder of min/max values across ranges in each statistics set,
+   * using this column's entry in FileInfo.column_orders. Missing entries are
    * UNORDERED.
    */
   3: optional list<parquet.BoundaryOrder> boundary_orders;
@@ -478,7 +511,9 @@ struct EncryptedColumnRowRangeStatistics {
  * reader without the key treats their statistics as unavailable.
  */
 struct EncryptedRowRangeStatistics {
-  /** One entry per column, sorted by column_ordinal. */
+  /** One entry per column whose statistics are stored separately, in any
+   * order.
+   */
   1: required list<EncryptedColumnRowRangeStatistics> columns;
 }
 
