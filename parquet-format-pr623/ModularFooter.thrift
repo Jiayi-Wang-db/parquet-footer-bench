@@ -22,11 +22,11 @@
  * metadata streams. A small root struct, ModularFooter (defined at the end of
  * this file), sits at the end of the file and records where each stream is.
  *
- * The modular footer uses these counts. Field docs refer to them by name,
- * e.g. "INT64, num_chunks values" means one value per chunk.
+ * The modular footer uses these counts:
  *   num_columns         = |physical (leaf) columns| = FileInfo.num_columns
  *   chunks_in_column(c) = |chunks of column c|, where a chunk is one
- *                         contiguous run of data pages; may be zero
+ *                         contiguous run of data pages; may be zero if
+ *                         every value in the column is null
  *   num_chunks          = |chunks| = sum of chunks_in_column(c)
  *   pages_in_chunk(k)   = |data pages of chunk k|
  *   num_pages           = |data pages| = sum of pages_in_chunk(k)
@@ -34,11 +34,14 @@
  *   num_row_groups      = |row groups|
  *   num_ranges          = |row ranges in one RangeStatistics|
  *
+ * The doc of each stream field starts with the stream's type and how many
+ * values it has, e.g. "INT64, one value per chunk". Values are never null
+ * unless the doc says "nullable".
+ *
  * Reader requirements: before using a stream, check its value count, the
- * indexes it contains, and the byte ranges it points to. When the file is
+ * positions it refers to, and the byte ranges it points to. When the file is
  * signed or encrypted, authenticate or decrypt every stream a read depends on
- * before using it. A missing or unreadable index stream never means that the
- * columns or chunks it describes are empty.
+ * before using it.
  */
 include "parquet.thrift"
 namespace cpp parquet.modular
@@ -55,13 +58,13 @@ namespace java org.apache.parquet.format.modular
  * DATA_PAGE_V2; DATA_PAGE (V1) and other page types are not allowed.
  * Allowing more page types requires a new ModularFooter.version.
  *
- * The stream schema is not serialized. The documentation of the field that
- * holds a StreamLocation gives the stream's physical type, its number of
- * values, and whether values can be null. Repetition levels are always 0.
- * Non-nullable streams have no definition levels (max level 0); nullable
- * streams use definition level 0 for null and 1 for a present value. A null
- * value still occupies its position in the stream. Thrift `optional` on a
- * field controls whether the stream exists, not whether its values can be null.
+ * The stream schema is not serialized. The doc of the field that holds a
+ * StreamLocation gives the stream's physical type, how many values it has,
+ * and whether values can be null. Repetition levels are always 0. Non-nullable
+ * streams have no definition levels (max level 0); nullable streams use
+ * definition level 0 for null and 1 for a present value. A null value still
+ * takes up its position in the stream. Thrift `optional` on a field controls
+ * whether the stream exists, not whether its values can be null.
  *
  * Streams are independent of each other: they need not have the same number
  * of values, their page boundaries need not line up, and together they do not
@@ -74,20 +77,21 @@ namespace java org.apache.parquet.format.modular
  */
 struct StreamLocation {
   /** Byte offset of the stream's first page header, from the start of the
-   * file. Inside ColumnRowRangeStatistics, offsets are relative to the start of
-   * page_streams instead.
+   * file. Inside ColumnRowRangeStatistics, the offset is relative to the start
+   * of page_streams instead.
    */
   1: required i64 offset;
 
-  /** Number of bytes the stream occupies in the file, including page headers
-   * and any signature or encryption overhead described in the PME section.
+  /** Number of bytes the stream takes up in the file, including page headers
+   * and any signature or encryption bytes described in the PME section.
    */
   2: required i64 length;
 
-  /** Codec for dictionary page bodies, and for data page values when
-   * DataPageHeaderV2.is_compressed is true. Levels are never compressed.
-   * Compression happens before signing or encryption. The codec is chosen
-   * independently of the codecs used for the file's data.
+  /** Compression codec of the stream's pages. It applies to dictionary page
+   * bodies, and to data page values when DataPageHeaderV2.is_compressed is
+   * true; levels are never compressed. Pages are compressed before they are
+   * signed or encrypted. This codec does not have to match the codecs used for
+   * the file's column data.
    */
   3: required parquet.CompressionCodec codec;
 }
@@ -96,33 +100,38 @@ struct StreamLocation {
  * Maps columns to their chunks, and chunks to their pages.
  *
  * Both fields are INT32 streams of range ends. Entry i is the exclusive end of
- * item i's range, and the range starts at entry i-1 (or at 0 for i = 0).
- * Entries count chunks or pages; they are not byte offsets. Because the first
- * range always starts at 0, that 0 is not stored. Entries equal to 0 or to the
- * previous entry are stored, and mean an empty range.
+ * item i's range. The range starts at start(index, i), which is 0 for i = 0
+ * and index[i-1] otherwise. With n entries, start(index, n) is the last
+ * entry: the total number of chunks or pages. Entries count chunks or pages;
+ * they are not byte offsets. Because the first range always starts at 0, that
+ * 0 is not stored. Entries equal to 0 or to the previous entry are stored, and
+ * mean an empty range.
  *
  * Example: three columns with 2, 0 and 3 chunks give
  *   column_chunk_index = [2, 2, 5]
  * Column 0 owns chunks [0, 2), column 1 owns none ([2, 2)), and column 2 owns
  * chunks [2, 5).
  *
- * Elsewhere in this file, start(index, i) means 0 if i = 0, otherwise
- * index[i-1], for 0 <= i <= the number of entries in index.
+ * Every column has an entry, even a column with no chunks, like column 1
+ * above. Readers must not treat a missing or unreadable index as meaning
+ * there are no chunks or pages.
  */
 struct DataLayout {
-  /** INT32, num_columns non-null values. Column c owns chunks
-   * [start(column_chunk_index, c), column_chunk_index[c]). Values never
-   * decrease, and the last one is num_chunks (the stream is empty when the
-   * file has no columns).
+  /** INT32, one value per column: the end of the column's range of chunks.
+   * Column c owns chunks [start(column_chunk_index, c), column_chunk_index[c]).
+   * Values never decrease, and the last one equals num_chunks. The stream is
+   * empty if the file has no columns.
    */
   1: required StreamLocation column_chunk_index;
 
-  /** INT32, num_chunks non-null values. Chunk k owns pages
-   * [start(page_index, k), page_index[k]). Values never decrease, and the last
-   * one is num_pages (the stream is empty when there are no chunks).
-   * Required when page_metadata is present, otherwise optional. If this stream
-   * is absent, readers find pages from the page headers in the column data;
-   * absence does not mean that the chunks have no pages.
+  /** INT32, one value per chunk: the end of the chunk's range of pages.
+   * Chunk k owns pages [start(page_index, k), page_index[k]). Values never
+   * decrease, and the last one equals num_pages. The stream is empty if the
+   * file has no chunks.
+   *
+   * Required when page_metadata is present. Without it, readers find pages by
+   * reading the page headers in the column data; a missing page_index does not
+   * mean the chunks have no pages.
    */
   2: optional StreamLocation page_index;
 }
@@ -131,133 +140,149 @@ struct DataLayout {
  * ColumnChunkMetadata.dictionary_ids) is a position in these streams.
  */
 struct DictionaryMetadata {
-  /** INT64, num_dictionaries non-null values; num_dictionaries must fit in a
-   * signed i32.
-   * Byte offset of each dictionary page header from the start of the file.
-   * A dictionary used by several chunks is stored once. Dictionaries may be
-   * stored anywhere and in any order; ordering them by first use is
-   * recommended. Both streams are empty when the file has no dictionaries.
+  /** INT64, one value per dictionary: the byte offset of the dictionary page
+   * header from the start of the file. The number of dictionaries must fit in
+   * a signed i32, because dictionary IDs are INT32.
+   *
+   * Each dictionary is stored once, even if several chunks use it.
+   * Dictionaries can be stored anywhere in the file and in any order; writers
+   * should store them in the order chunks first use them. If the file has no
+   * dictionaries, both streams are empty.
    */
   1: required StreamLocation offsets;
 
-  /** INT64, num_dictionaries non-null values. Size in bytes of each dictionary
-   * page as stored, including its header; always positive. Dictionary d
-   * occupies [offsets[d], offsets[d] + lengths[d]), which must not overlap data
-   * pages or other dictionaries.
+  /** INT64, one value per dictionary: the size in bytes of the dictionary page
+   * as stored, including its header. Always greater than zero. Dictionary d
+   * occupies bytes [offsets[d], offsets[d] + lengths[d]), which must not
+   * overlap any data pages or other dictionaries.
    */
   2: required StreamLocation lengths;
 }
 
+/**
+ * Optional row-group view of the file, kept for compatibility with existing
+ * readers. Many Parquet readers split work into tasks by row group, using
+ * row-group row counts and byte offsets. Writers that still produce row groups
+ * can record them here so those readers keep their current behavior.
+ *
+ * When present, this struct records each row group's row count and, in
+ * offsets, its physical byte boundaries in the file. If this struct is
+ * absent, the file does not record row-group boundaries; the data may still
+ * be laid out in row groups.
+ */
 struct RowGroupMetadata {
-  /** INT64, num_row_groups non-null values. Number of rows in each row
-   * group, in row-group order. The values sum to FileInfo.num_rows.
+  /** INT64, one value per row group: the number of rows in the row group, in
+   * row-group order. The values sum to FileInfo.num_rows.
    */
   1: required StreamLocation num_rows;
 
-  /** INT64, num_row_groups + 1 non-null values. Optional hint for files whose
-   * row groups are stored contiguously in file order: row group g occupies
-   * bytes [offsets[g], offsets[g+1]). Values never decrease. Omit this stream
-   * when interleaved chunks or shared dictionaries mean row groups do not have
-   * a contiguous byte range. Readers still locate chunks and dictionaries
-   * through ColumnChunkMetadata and DictionaryMetadata.
+  /** INT64, one value per row group plus one: the byte boundaries of the row
+   * groups. Row group g occupies bytes [offsets[g], offsets[g+1]). Values never
+   * decrease.
+   *
+   * Write this stream only when each row group is stored as one contiguous
+   * byte range, in file order. Leave it out when chunks of different row groups
+   * are interleaved, or when dictionaries shared between row groups break up
+   * those ranges. Readers still find chunks and dictionaries through
+   * ColumnChunkMetadata and DictionaryMetadata, not through these offsets.
    */
   2: optional StreamLocation offsets;
 }
 
 /**
- * Per-chunk metadata. A column chunk is one contiguous run of data pages for
- * a single column. Chunks are not tied to row groups: each column can have its
- * own number of chunks, including zero.
- *
- * Every stream has num_chunks values, one per chunk, ordered by column and
- * then by chunk within the column; DataLayout.column_chunk_index says which
- * positions belong to which column.
+ * Per-chunk metadata. Each stream has one value per chunk, in the chunk order
+ * defined by DataLayout.column_chunk_index. Chunk boundaries are not tied to
+ * row groups.
  */
 struct ColumnChunkMetadata {
-  /** INT32, num_chunks non-null values. The parquet.CompressionCodec of
-   * each chunk.
+  /** INT32, one value per chunk: the chunk's compression codec, as a
+   * parquet.CompressionCodec value.
    */
   1: required StreamLocation codecs;
 
-  /** INT32, num_chunks nullable values. Value k is chunk k's dictionary ID,
-   * in [0, num_dictionaries);
-   * null means chunk k has no dictionary. Chunks of the same physical column
-   * may share a dictionary; chunks of different columns may not. A dictionary
-   * must be compatible with every chunk that uses it; in particular, those
-   * chunks must use the same codec, because the dictionary page is compressed
-   * with it. Every dictionary must be used by at least one chunk.
+  /** INT32, one nullable value per chunk: the chunk's dictionary ID, which is
+   * its position in DictionaryMetadata, or null if the chunk has no dictionary.
+   *
+   * Several chunks can share one dictionary, with these rules:
+   * - The chunks must belong to the same column.
+   * - The chunks must use the same codec, because the dictionary page is
+   *   compressed only once.
+   * - Every dictionary must be used by at least one chunk.
    */
   2: required StreamLocation dictionary_ids;
 
-  /** BOOLEAN, num_chunks non-null values.
-   * True if all data pages use the chunk's dictionary; false when the chunk
-   * doesn't have a dictionary.
+  /** BOOLEAN, one value per chunk: true if every data page in the chunk is
+   * encoded with the chunk's dictionary. Always false for a chunk without a
+   * dictionary.
    */
   3: required StreamLocation is_fully_dictionary_encoded;
 
-  /** INT64, num_chunks non-null values. Encoded but uncompressed size of each
-   * chunk: page headers plus uncompressed page bodies. A shared dictionary is
-   * counted once for each chunk that uses it. If this stream is absent, the
-   * sizes are unknown.
+  /** INT64, one value per chunk: the chunk's size after encoding but before
+   * compression, i.e. page headers plus uncompressed page bodies, including the
+   * chunk's dictionary page. A shared dictionary counts in full toward every
+   * chunk that uses it. If this stream is absent, the sizes are unknown.
    */
   4: optional StreamLocation total_uncompressed_sizes;
 
-  /** INT64, num_chunks non-null values. Number of values in each chunk,
-   * including nulls. This equals the number of definition/repetition levels
-   * written for the chunk. It is not a row count, except for a non-nested,
-   * required column, where the two are equal.
+  /** INT64, one value per chunk: the number of values in the chunk, including
+   * nulls. This equals the number of definition/repetition levels written for
+   * the chunk. It is not a row count: a nested column can have more values
+   * than rows.
    */
   5: required StreamLocation num_values;
 
-  /** INT64, num_chunks non-null values. Index of each chunk's first row within
-   * the file. A chunk's position in its column does not say which rows it
-   * covers; this stream does. Required if any statistics use COLUMN_CHUNK
-   * ranges, including encrypted statistics. Independent of row groups and of
-   * num_values. When PageMetadata.first_row_indexes is present, the value
-   * must equal the first row of the chunk's first page.
+  /** INT64, one value per chunk: the row number, within the file, of the
+   * chunk's first row. Readers need this to know which rows a chunk covers; the
+   * chunk's position in its column does not tell them. Row numbers do not
+   * depend on row groups or on num_values.
+   *
+   * Required if any statistics, including encrypted statistics, use
+   * COLUMN_CHUNK ranges. When PageMetadata.first_row_indexes is present, each
+   * chunk's value must equal the first row of its first page.
    */
   6: optional StreamLocation first_row_indexes;
 
-  /** INT64, num_chunks non-null values. Byte offset, from the start of the
-   * file, of each chunk's first data page header. A chunk's data pages are
-   * contiguous. The dictionary page is not part of this range; it is located
-   * through DictionaryMetadata. Chunks need not be adjacent or stored in offset
-   * order.
+  /** INT64, one value per chunk: the byte offset, from the start of the file,
+   * of the chunk's first data page header. A chunk's data pages are stored
+   * contiguously. Its dictionary page is not part of this range and is found
+   * through DictionaryMetadata. Chunks do not have to be adjacent or stored in
+   * any particular order.
    */
   7: required StreamLocation offsets;
 
-  /** INT64, num_chunks non-null values. Size in bytes of each chunk's data
-   * pages as stored in the file: compressed, including page headers. The
-   * dictionary page is not included. Zero if and only if the chunk has no data
-   * pages. Non-empty chunks occupy
-   * [offsets[k], offsets[k] + compressed_sizes[k]), and these ranges must not
-   * overlap. Readers must check
-   * each range against the file size and for integer overflow, and must not
-   * infer a chunk's size from the position of another chunk or dictionary.
+  /** INT64, one value per chunk: the size in bytes of the chunk's data pages as
+   * stored, i.e. compressed and including page headers, but not including the
+   * dictionary page. Zero if and only if the chunk has no data pages. Chunk k
+   * occupies bytes [offsets[k], offsets[k] + compressed_sizes[k]); the ranges
+   * of non-empty chunks must not overlap.
+   *
+   * Readers must check each range against the file size and for integer
+   * overflow. They must not work out a chunk's size from where another chunk or
+   * dictionary starts.
    */
   8: required StreamLocation compressed_sizes;
 }
 
 /**
- * Per-page metadata. Every stream has num_pages values, one per data page,
- * ordered by chunk and then by page within the chunk; DataLayout.page_index
- * says which positions belong to which chunk. The two streams are independently
- * optional. Omit this struct when both are absent.
+ * Per-page metadata. Each stream has one value per data page, in the page
+ * order defined by DataLayout.page_index. Both streams are optional; leave out
+ * the whole struct when neither is written.
  */
 struct PageMetadata {
-  /** INT64, num_pages non-null values. Index of each page's first row within
-   * the file. Required if any statistics use PAGE ranges, including encrypted
-   * statistics. If absent, readers get row positions from the data page
+  /** INT64, one value per page: the row number, within the file, of the page's
+   * first row. Required if any statistics, including encrypted statistics, use
+   * PAGE ranges. If absent, readers get row positions from the data page
    * headers.
    */
   1: optional StreamLocation first_row_indexes;
 
-  /** INT64, num_pages non-null values. Byte offset of each page header relative
-   * to its chunk's ColumnChunkMetadata.offsets[k]. In each non-empty chunk the
-   * first value is 0 and is stored, even for single-page chunks. Values
-   * strictly increase and stay below compressed_sizes[k]; the last page ends at
-   * the end of the chunk. If absent, readers scan page headers to find pages
-   * after the first.
+  /** INT64, one value per page: the byte offset of the page header from the
+   * start of its chunk (ColumnChunkMetadata.offsets[k]). The first page of each
+   * chunk has offset 0, which is still stored, even when the chunk has only one
+   * page. Offsets strictly increase and are less than the chunk's
+   * compressed_sizes[k]; the last page runs to the end of the chunk. If this
+   * stream is absent, readers find the pages after the first by reading page
+   * headers.
    */
   2: optional StreamLocation relative_offsets;
 }
@@ -276,120 +301,128 @@ enum RowRangeKind {
 }
 
 /**
- * Statistics for num_ranges row ranges. The struct that contains a
- * RangeStatistics defines which ranges belong to which column.
+ * Statistics for a list of row ranges: each stream has one value per range
+ * (num_ranges in total). The struct that contains a RangeStatistics says which
+ * ranges belong to which column.
  *
- * A null value, or an absent stream, means the statistic is unknown for that
- * range. This includes the case where every value in the range is null.
- * Counts are never negative. When all three are known,
+ * A null value or a missing stream means the statistic is unknown for that
+ * range. In particular, null min/max values do not mean that every value in
+ * the range is null; use null_count and num_values for that. Counts are never
+ * negative. When null_count, nan_count and num_values are all known,
  * null_count + nan_count <= num_values.
  */
 struct RangeStatistics {
-  /** INT64, num_ranges non-null values. Index of each range's first row within
-   * the file. Present if and only if range_kind is ARBITRARY. For each column,
-   * the first value is 0 and values strictly increase while staying below
-   * FileInfo.num_rows. A range ends where the next one starts, or at
-   * FileInfo.num_rows for the last range. Ranges need not line up with chunks,
-   * pages or row groups.
+  /** INT64, one value per range: the row number, within the file, of the
+   * range's first row. Present if and only if range_kind is ARBITRARY.
+   *
+   * For each column, the first range starts at row 0, and starts strictly
+   * increase and stay below FileInfo.num_rows. Each range ends where the next
+   * one starts; the last one ends at FileInfo.num_rows. Ranges do not have to
+   * line up with chunks, pages or row groups.
    */
   1: optional StreamLocation first_row_indexes;
 
-  /** INT64, num_ranges nullable values. Number of null values in each range. */
+  /** INT64, one nullable value per range: the number of null values in the
+   * range.
+   */
   2: optional StreamLocation null_count;
 
-  /** INT64, num_ranges nullable values. Number of NaN values in each range.
-   * NaNs are counted as non-null values.
+  /** INT64, one nullable value per range: the number of NaN values in the
+   * range. NaNs are non-null values, so they are not part of null_count.
    */
   3: optional StreamLocation nan_count;
 
-  /** INT64, num_ranges nullable values. Number of values in each range,
-   * including nulls and NaNs. This is not a row count.
+  /** INT64, one nullable value per range: the number of values in the range,
+   * including nulls and NaNs. For a nested column this can be more than the
+   * number of rows.
    */
   4: optional StreamLocation num_values;
 
-  /** INT64, num_ranges nullable values. Number of distinct values in each
+  /** INT64, one nullable value per range: the number of distinct values in the
    * range.
    */
   5: optional StreamLocation distinct_counts;
 
-  /** Min/max bounds, one stream per physical type. Each stream stores two
-   * values per range: [min_0, max_0, min_1, max_1, ...]. Each value is
-   * independently nullable. A bound is null when it is unavailable or when the
-   * column does not have the stream's physical type. A min/max pair may span
-   * two metadata pages.
+  /** Minimum and maximum values, in one stream per physical type. A column's
+   * bounds are stored in the stream for its physical type. Each stream has two
+   * nullable values per range, min then max: [min_0, max_0, min_1, max_1, ...].
+   * A value is null when that bound is unavailable, or when the column has a
+   * different physical type. A min/max pair may be split across two pages of
+   * the stream.
    */
-  6: optional StreamLocation min_max_boolean; // BOOLEAN, 2 * num_ranges values.
-  7: optional StreamLocation min_max_int32; // INT32, 2 * num_ranges values.
-  8: optional StreamLocation min_max_int64; // INT64, 2 * num_ranges values.
-  9: optional StreamLocation min_max_float; // FLOAT, 2 * num_ranges values.
-  10: optional StreamLocation min_max_double; // DOUBLE, 2 * num_ranges values.
-  // BYTE_ARRAY, 2 * num_ranges values.
-  11: optional StreamLocation min_max_byte_array;
+  6: optional StreamLocation min_max_boolean; // BOOLEAN
+  7: optional StreamLocation min_max_int32; // INT32
+  8: optional StreamLocation min_max_int64; // INT64
+  9: optional StreamLocation min_max_float; // FLOAT
+  10: optional StreamLocation min_max_double; // DOUBLE
+  11: optional StreamLocation min_max_byte_array; // BYTE_ARRAY
 
-  /** BOOLEAN, 2 * num_ranges nullable values, aligned with the min/max values
+  /** BOOLEAN, two nullable values per range, matching the min/max values
    * above. True means the bound is exact (it is the actual minimum or maximum
-   * of the range), false means it is not exact, and null means unknown. If a
-   * bound is unavailable, its entry here must be null.
+   * of the range), false means it is not, and null means unknown. The value
+   * must be null wherever the bound itself is unavailable.
    */
   12: optional StreamLocation min_max_is_exact;
 
-  /** How the ranges are defined. Writers always set this field; when it is
-   * absent, readers treat it as ARBITRARY. Readers do not support values they
-   * do not recognize.
+  /** How the ranges are defined. Writers always set this field; if it is
+   * absent, readers treat it as ARBITRARY. Readers cannot use statistics whose
+   * range_kind they do not recognize.
    *
    * COLUMN_CHUNK: one range per chunk. Requires
    *   ColumnChunkMetadata.first_row_indexes.
    * PAGE: one range per page. Requires PageMetadata.first_row_indexes and both
-   *   DataLayout indexes. Every chunk covered by these statistics must have at
+   *   DataLayout streams. Every chunk covered by these statistics must have at
    *   least one page.
-   * ARBITRARY: ranges listed in first_row_indexes. Used when ranges based on
-   *   chunk or page positions do not fit.
+   * ARBITRARY: ranges listed in first_row_indexes, for when ranges based on
+   *   chunks or pages do not fit.
    *
-   * For each column covered by these statistics, the ranges must be non-empty,
-   * start and end on row boundaries, and together cover [0, FileInfo.num_rows)
-   * without gaps or overlaps: the first range starts at 0, starts strictly
-   * increase, and each range ends where the next one starts (the last ends at
-   * num_rows). Readers must check this; increasing starts alone do not prove
-   * there are no gaps. The same rules apply to encrypted statistics. Before
-   * using the chunk/page index streams and first_row_indexes streams these
-   * statistics depend on, readers must authenticate or decrypt them according
-   * to their own protection.
+   * For each column covered by these statistics, the ranges must cover every
+   * row from 0 to FileInfo.num_rows exactly once, with no empty ranges. Ranges
+   * start and end on row boundaries, which matters for nested columns. In other
+   * words, the first range starts at row 0, starts strictly increase, and each
+   * range ends where the next one starts (the last at num_rows). Readers must
+   * check these rules; increasing starts alone are not enough to prove there
+   * are no gaps.
+   *
+   * The same rules apply to encrypted statistics. Before using the DataLayout
+   * and first_row_indexes streams that these statistics depend on, readers
+   * must authenticate or decrypt those streams under their own protection.
    */
   13: optional RowRangeKind range_kind = RowRangeKind.ARBITRARY;
 }
 
 /**
- * One set of row-range statistics covering all columns. Its streams are
- * protected the same way as the footer.
+ * One set of row-range statistics for all columns. Its streams are protected
+ * the same way as the rest of the footer.
  *
- * With COLUMN_CHUNK ranges (num_ranges = num_chunks) or PAGE ranges
- * (num_ranges = num_pages), every chunk or page keeps its position. Statistics
- * that are unavailable, or that are stored in a column's separately encrypted
- * module, are written as null (unknown).
- * With ARBITRARY ranges, a column may have zero ranges here, shown by two equal
- * consecutive column_range_starts entries.
+ * With COLUMN_CHUNK or PAGE ranges there is one range per chunk or per page,
+ * so every chunk or page has a slot, and num_ranges equals num_chunks or
+ * num_pages. A slot is null (unknown) when the statistic is unavailable or is
+ * stored in the column's separately encrypted module. With ARBITRARY ranges,
+ * each column has its own ranges, and a column may have none.
  */
 struct SharedRangeStatistics {
-  /** INT64, num_columns + 1 non-null values. Present if and only if
-   * statistics.range_kind is ARBITRARY. Column c owns ranges
-   * [column_range_starts[c], column_range_starts[c+1]). Values never decrease,
-   * the first is 0 and the last is num_ranges. Equal consecutive values mean
-   * the column has no ranges.
+  /** INT64, one value per column plus one: where each column's ranges start.
+   * Present if and only if statistics.range_kind is ARBITRARY. Column c owns
+   * ranges [column_range_starts[c], column_range_starts[c+1]). Values never
+   * decrease; the first is 0 and the last is num_ranges. Two equal consecutive
+   * values mean the column has no ranges.
    */
   1: optional StreamLocation column_range_starts;
 
-  /** The statistics. Column c owns these positions, where
-   * a = start(column_chunk_index, c) and b = column_chunk_index[c]
-   * (start() is defined in DataLayout):
+  /** The statistics for all columns. Which positions belong to column c
+   * depends on range_kind, with a = start(column_chunk_index, c) and
+   * b = column_chunk_index[c] (start() is defined in DataLayout):
    *   COLUMN_CHUNK: [a, b).
    *   PAGE: [start(page_index, a), start(page_index, b)).
    *   ARBITRARY: the positions given by column_range_starts.
    */
   2: required RangeStatistics statistics;
 
-  /** INT32, num_columns non-null values. The parquet.BoundaryOrder of each
-   * column's min/max values. Columns without statistics in this set must be
-   * UNORDERED. If the stream is absent, every column is UNORDERED.
+  /** INT32, one value per column: whether the column's min/max values are
+   * sorted across its ranges, as a parquet.BoundaryOrder. Columns with no
+   * statistics in this set must be UNORDERED. If this stream is absent, every
+   * column is UNORDERED.
    */
   3: optional StreamLocation boundary_orders;
 }
@@ -398,9 +431,11 @@ struct SharedRangeStatistics {
 struct FileInfo {
   /** Number of physical (leaf) columns. */
   1: required i32 num_columns;
+  /** Number of rows in the file. */
   2: required i64 num_rows;
   /** Schema of the file's data, as in FileMetaData.schema. */
   3: required list<parquet.SchemaElement> schema;
+  /** Application that wrote the file, as in FileMetaData.created_by. */
   4: optional string created_by;
 }
 
@@ -449,11 +484,12 @@ struct FileInfo {
  * Both reuse the shared, authenticated DataLayout and first_row_indexes
  * streams. ARBITRARY statistics store their own first_row_indexes for this
  * column, and no column_range_starts. Only the min/max stream for the column's
- * physical type may be present (2 * num_ranges values).
+ * physical type may be present.
  */
 struct ColumnRowRangeStatistics {
-  /** One or more independent statistics sets, with RangeStatistics semantics.
-   * Positions are local to this column. All entries are encrypted together.
+  /** One or more independent statistics sets for this column, with the same
+   * meaning as RangeStatistics elsewhere. Range positions count only this
+   * column's chunks, pages or ranges. All sets are encrypted together.
    */
   1: required list<RangeStatistics> statistics;
 
@@ -469,21 +505,21 @@ struct ColumnRowRangeStatistics {
    */
   2: required binary page_streams;
 
-  /** One BoundaryOrder per statistics entry. Missing entries, or an absent
-   * list, mean UNORDERED.
+  /** One BoundaryOrder per entry in statistics. If the list is absent or
+   * shorter than statistics, the missing entries are UNORDERED.
    */
   3: optional list<parquet.BoundaryOrder> boundary_orders;
 }
 
 /** Location and key of one column's encrypted statistics module. */
 struct EncryptedColumnRowRangeStatistics {
-  /** Position of the column among the physical (leaf) columns in
-   * FileInfo.schema; 0 <= column_ordinal < num_columns.
+  /** Which column the module belongs to: its position among the physical
+   * (leaf) columns in FileInfo.schema, from 0 to num_columns - 1.
    */
   1: required i32 column_ordinal;
 
-  /** Which key encrypts the module; it never contains the key itself. Exactly
-   * one option is set and applies to the whole module.
+  /** Which key encrypts the module. It identifies the key but never contains
+   * it. Exactly one option is set, and it applies to the whole module:
    * ENCRYPTION_WITH_COLUMN_KEY: path_in_schema must match column_ordinal.
    *   The reader resolves the column's data encryption key from key_metadata.
    * ENCRYPTION_WITH_FOOTER_KEY: the module uses the footer's data encryption
@@ -520,8 +556,9 @@ struct EncryptedColumnRowRangeStatistics {
  * failed authentication or malformed plaintext is an error.
  */
 struct EncryptedRowRangeStatistics {
-  /** Sorted by column_ordinal, with no duplicate columns and no overlapping
-   * byte ranges.
+  /** One entry per column with encrypted statistics, sorted by column_ordinal.
+   * Each column appears at most once, and the modules' byte ranges must not
+   * overlap.
    */
   1: required list<EncryptedColumnRowRangeStatistics> columns;
 }
@@ -552,9 +589,12 @@ struct EncryptedRowRangeStatistics {
  * signature and AAD rules.
  */
 struct ModularFooter {
-  1: required i32 version; // Allocation pending.
+  /** Format version of the modular footer. The value is not allocated yet. */
+  1: required i32 version;
 
-  /** Exactly one of file_info and encrypted_file_info is present. */
+  /** Basic file metadata, in plaintext. Exactly one of file_info and
+   * encrypted_file_info is present.
+   */
   2: optional FileInfo file_info;
   3: required DataLayout data_layout;
   4: required DictionaryMetadata dictionary_metadata;
@@ -562,29 +602,34 @@ struct ModularFooter {
   6: required ColumnChunkMetadata column_chunk_metadata;
   7: optional PageMetadata page_metadata;
 
-  /** Any number of independent statistics sets, preferably ordered from
-   * coarse to fine ranges. Range boundaries in different sets need not nest;
-   * readers match ranges across sets by row interval, not by list position,
-   * and must not add up counts from overlapping ranges. Omit sets that have
-   * no available statistics, and omit the list when no sets remain.
+  /** Any number of independent statistics sets, for example one with a range
+   * per chunk and one with a range per page. Where possible, list sets with
+   * larger ranges first. Ranges in different sets do not have to nest; readers
+   * match ranges across sets by row interval, not by position in the list, and
+   * must not add up counts from overlapping ranges. Leave out sets that have no
+   * statistics, and leave out the list if no sets remain.
    */
   8: optional list<SharedRangeStatistics> row_range_statistics;
 
-  /** BYTE_ARRAY, one non-null value per key/value metadata entry. */
+  /** BYTE_ARRAY, one value per key/value metadata entry: the key. */
   9: optional StreamLocation key_value_metadata_keys;
 
-  /** BYTE_ARRAY, nullable, one value per entry in key_value_metadata_keys. */
+  /** BYTE_ARRAY, one nullable value per entry in key_value_metadata_keys: the
+   * value for that key.
+   */
   10: optional StreamLocation key_value_metadata_values;
 
-  /** PME algorithm, AAD parameters and footer key metadata (opaque to the
-   * format). Absent in plaintext files: FileInfo and all streams are plaintext,
-   * and there is no signature.
-   * With file_info: each stream is individually signed.
-   * With encrypted_file_info: each stream is individually encrypted with the
-   * footer key.
-   * In both cases the root struct is signed. aad_file_unique is required; the
-   * reader must supply the AAD prefix if the file requires one. If key_metadata
-   * is absent, the reader must obtain the footer key some other way.
+  /** Encryption settings: the PME algorithm, AAD parameters and footer key
+   * metadata. The key metadata is opaque to the format.
+   * - Absent: the file is plaintext. FileInfo and all streams are plaintext,
+   *   and nothing is signed.
+   * - Present with file_info: FileInfo is plaintext, and each stream is
+   *   individually signed.
+   * - Present with encrypted_file_info: FileInfo and each stream are
+   *   individually encrypted with the footer key.
+   * When present, the root struct is always signed. aad_file_unique is
+   * required. If the file needs an AAD prefix, the reader must supply it. If
+   * key_metadata is absent, the reader must get the footer key some other way.
    */
   11: optional parquet.FileCryptoMetaData crypto_metadata;
 
