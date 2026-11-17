@@ -105,14 +105,13 @@ struct StreamLocation {
  * entries, start(index, n) is the last entry: the total number of chunks or
  * pages. An item with no chunks or pages repeats the previous total.
  *
- * Example: three columns with 2, 0 and 3 chunks give
- *   column_chunk_index = [2, 2, 5]
- * Column 0 owns chunks [0, 2), column 1 owns none ([2, 2)), and column 2 owns
- * chunks [2, 5).
+ * Example: three columns with 2, 1 and 3 chunks give
+ *   column_chunk_index = [2, 3, 6]
+ * Column 0 owns chunks [0, 2), column 1 owns chunk [2, 3), and column 2 owns
+ * chunks [3, 6).
  *
- * Every column has an entry, even a column with no chunks, like column 1
- * above. column_chunk_index must have exactly num_columns values, and
- * page_index, when present, must have exactly num_chunks values.
+ * column_chunk_index must have exactly num_columns values, and page_index,
+ * when present, must have exactly num_chunks values.
  */
 struct DataLayout {
   /** INT32, one value per column: the inclusive prefix sum of
@@ -290,17 +289,16 @@ struct RangeStatistics {
    *   ColumnChunkMetadata.first_row_indexes must be present.
    * PAGE: statistics over each data page, one entry per page.
    *   PageMetadata.first_row_indexes and both DataLayout streams must be
-   *   present, and every chunk covered must have at least one page.
+   *   present.
    * ARBITRARY: statistics over row ranges chosen by the writer and listed in
    *   first_row_indexes, for example every 100,000 rows. The ranges need not
    *   line up with chunks, pages or row groups.
    *
    * For each column represented by one or more ranges, those ranges cover
-   * [0, FileInfo.num_rows) exactly once, with no empty ranges. Columns without
-   * ARBITRARY statistics have no ranges. For COLUMN_CHUNK and PAGE, columns
-   * with no chunks or pages, respectively, have no ranges. Empty files have
-   * no ranges. These rules also apply to encrypted statistics. Readers cannot
-   * use statistics whose range_kind they do not recognize.
+   * [0, FileInfo.num_rows) exactly once, with no empty ranges. With
+   * ARBITRARY, a column without statistics has no ranges. Empty files have no
+   * ranges. These rules also apply to encrypted statistics. Readers cannot use
+   * statistics whose range_kind they do not recognize.
    */
   1: required RowRangeKind range_kind;
 
@@ -480,7 +478,7 @@ struct ColumnRowRangeStatistics {
    */
   2: required binary stream_data;
 
-  /** BoundaryOrder of min/max values across ranges in each statistics set,
+  /** One BoundaryOrder per entry in statistics, in the same order, compared
    * using this column's entry in FileInfo.column_orders. Missing entries are
    * UNORDERED.
    */
